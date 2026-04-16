@@ -1,6 +1,6 @@
 # Frame to Video — Figma Plugin
 
-Export Figma frames as animated 1080p videos with background video, music, and element animations.
+Export Figma frames as animated 1080p videos with background video, music, and element animations. Supports **frame sets** (Sections with many variants) and **Key Art video replacement** for a consistent look across differently-sized frames.
 
 ## Installation
 
@@ -10,48 +10,63 @@ Export Figma frames as animated 1080p videos with background video, music, and e
 
 ## How to Use
 
-### 1. Load a Frame
-- Select a single **Frame** in Figma (works with Components/Instances too)
-- Click **"Load Selected Frame"** — the plugin exports every direct child as a high-res PNG
+### 1. Load a Selection
+You can select either:
+- **A single Frame** (Component/Instance/Group also work) — loaded as a 1-variant set, or
+- **A Section** containing multiple sibling frames — every child frame is loaded as a **variant** of the same set
 
-### 2. Configure Animations
-- Click any element in the left panel to select it
-- Choose an animation type:
-  - **Fade In** — opacity 0→1
-  - **Slide from Left/Right/Top/Bottom** — element slides in with fade
-  - **Scale In** — element scales from 30% to 100% with fade
-  - **Text Reveal →** — progressive left-to-right clip reveal (great for headlines/copy)
-- Set **Start** time (when the animation begins in the video)
-- Set **Duration** (how long the animation takes)
-- Set **Distance** (pixel offset for slide animations)
-- Choose an **Easing** curve
-- Click **"Apply to Element"** or **"Apply to All"** (auto-staggers at 0.15s intervals)
+Click **"Load Selection"**. The plugin exports each variant's direct children as high-res PNGs.
 
-### 3. Add Background Media
-- **Background Video**: Drag & drop or click to upload any video file — plays behind all elements, fills the frame (cover mode), with adjustable opacity
-- **Background Audio**: Drag & drop any audio file for the soundtrack — muxed into the final export with volume control
+Each variant appears in the **Variants** list (left panel) with its dimensions and an editable filename. Click a variant to preview it.
 
-### 4. Preview
+### 2. Key Art Video Replacement
+Any layer whose name matches `KeyArt N` (case- and space-insensitive — `KeyArt 1`, `keyart1`, `KEY ART 1`, `KEYART1` all work) is detected as a **Key Art slot**. These appear in the **Key Art Videos** panel on the right.
+
+- Drop a video into a slot → it replaces the static Key Art image in every variant that contains that slot, **at the exact position and size the static Key Art occupies in each variant**.
+- This means scale/position auto-match across frame sizes. Author your video at the reference aspect ratio; if the variant rect differs slightly, the video is center-cropped (cover-fit).
+- Each slot has its own loop and opacity controls.
+
+### 3. Configure Animations
+Click any element in the Elements list. Choose an animation type:
+- **Fade In** — opacity 0→1
+- **Slide from Left/Right/Top/Bottom** — slide in with fade
+- **Scale In** — scales from 30% to 100% with fade
+- **Text Reveal →** — progressive left-to-right clip reveal
+
+Set **Start**, **Duration**, **Distance**, and **Easing**. Click **"Apply to Element"** or **"Apply to All"**.
+
+Animations are **shared across the set** by element name — applying Fade In to `Headline` in one variant applies it to every variant's `Headline`. (Matching is case- and space-insensitive, same rules as Key Art.)
+
+### 4. Add Background Media (Set-Wide)
+- **Background Video**: plays behind all elements in every variant (cover-fit), adjustable opacity
+- **Background Audio**: muxed into every export with volume control
+
+### 5. Preview
 - Use ▶ / ⏸ to play/pause
-- Click anywhere on the timeline bar to scrub
-- Adjust **Duration** in the right panel to change total video length
+- Click the timeline to scrub
+- Adjust **Duration** in the right panel for total video length
+- Switch variants in the left panel to preview each one
 
-### 5. Export
-- Set your target resolution (1080p default), frame rate (30fps default), and quality
-- Click **"Export Video"** — the plugin renders every frame and downloads the result
-- If your browser supports MP4 export (recent Chrome/Figma desktop), it'll auto-detect; otherwise exports WebM
+### 6. Export
+- Set resolution (1080p default), frame rate (30fps default), and quality
+- Each variant has an **editable filename** defaulting to `<SectionName>_<FrameName>` (sanitized)
+- Click **"Export Video"** — the plugin renders every variant sequentially and triggers a download for each
+- MP4 auto-detected on recent Chrome/Figma desktop; otherwise WebM
 
 ## Architecture
 
 ```
 manifest.json     → Plugin config
-code.js           → Figma main thread: reads frame, exports children as PNGs
+code.js           → Figma main thread: reads Section or Frame,
+                    iterates frame children, exports each as a high-res PNG
 ui.html           → Plugin UI (all-in-one):
-                      ├── Animation engine (easing, state calc per frame)
-                      ├── Canvas renderer (composites bg video + elements)
-                      ├── Playback controller (real-time preview)
-                      ├── Media loader (video/audio via Blob URLs)
-                      └── Export engine (Canvas.captureStream → MediaRecorder)
+                      ├── State: frames[] (variants), animPresets, keyArtVideos (per-slot)
+                      ├── Key Art detection (name → "keyartN" slot)
+                      ├── Animation engine (shared across set by element name)
+                      ├── Canvas renderer (bg video + per-element static/video draw)
+                      ├── Playback controller (real-time preview of current variant)
+                      ├── Media loader (bg + per-slot videos via Blob URLs)
+                      └── Export engine (iterates variants → MediaRecorder per variant)
 ```
 
 ## Technical Notes
@@ -65,10 +80,11 @@ ui.html           → Plugin UI (all-in-one):
 
 ## Limitations & Future Improvements
 
-- **Nested frames**: Currently only reads direct children of the selected frame. Deep nesting would require recursive export.
+- **Nested frames**: Currently only reads direct children of each variant frame. Deep nesting would require recursive export.
 - **Fonts in typewriter**: True character-by-character typewriter would require font rendering on canvas. Current "Text Reveal" does a clean left-to-right clip instead.
-- **Video seeking precision**: Background video frame accuracy depends on browser's video decoder. For frame-perfect sync, pre-render the bg video to image sequence.
+- **Video seeking precision**: Background + Key Art video frame accuracy depends on browser's video decoder. For frame-perfect sync, pre-render the source video to an image sequence.
 - **Large frames**: Very large frames (4K+) with many elements may be slow to export due to canvas compositing.
+- **Key Art aspect mismatch**: If the Key Art video's aspect differs from a variant's Key Art rect, the video is center-cropped (cover-fit). For best results, author one video per dominant aspect and author multiple Key Arts (`KeyArt 1` for landscape, `KeyArt 2` for portrait, etc.).
 
 ## Converting WebM → MP4 (if needed)
 
