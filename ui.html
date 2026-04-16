@@ -122,6 +122,14 @@
     display: inline-block; font-size: 9px; padding: 1px 5px;
     border-radius: 3px; background: var(--accent); color: #fff; margin-left: 4px;
   }
+  .element-item.is-parent-header {
+    cursor: default; background: rgba(255,255,255,0.03);
+    border-left: 3px solid transparent;
+  }
+  .element-item.is-parent-header:hover { background: rgba(255,255,255,0.03); }
+  .element-item.is-line-child {
+    padding-left: 24px; background: rgba(0,0,0,0.08);
+  }
   .anim-config {
     padding: 12px; border-top: 1px solid var(--border);
     max-height: 280px; overflow-y: auto; flex-shrink: 0;
@@ -350,6 +358,7 @@ var state = {
   frames: [],                    // { id, name, exportName, width, height, bgColor, elements: [], childCount }
   selectedFrameIndex: -1,
   selectedElementIndex: -1,
+  selectedLineIndex: null,
   animPresets: {},               // { normalizedName: { type, start, duration, easing, distance } }
   keyArtVideos: {},              // { slotKey: { file, video, loop, opacity } }
   currentTime: 0, duration: 5,
@@ -371,7 +380,13 @@ function sanitizeFilename(s) {
   return (s || "").replace(/[\/\\:*?"<>|]+/g, "_").replace(/\s+/g, "_").replace(/_+/g, "_").replace(/^_+|_+$/g, "");
 }
 function currentFrame() { return state.selectedFrameIndex >= 0 ? state.frames[state.selectedFrameIndex] : null; }
-function getAnimFor(el) { return (el && state.animPresets[el.normalizedName]) || defaultAnim(); }
+// Key an animation preset by element name (single-line) or name+lineIndex (multi-line).
+function animKey(el, lineIndex) {
+  return el.normalizedName + (lineIndex != null ? "__line" + lineIndex : "");
+}
+function getAnimFor(el, lineIndex) {
+  return (el && state.animPresets[animKey(el, lineIndex)]) || defaultAnim();
+}
 
 // ── EASING ──
 var easings = {
@@ -442,7 +457,16 @@ function drawCoverInto(c, src, dx, dy, dw, dh) {
 }
 
 function drawElement(c, el, t) {
-  var a = getAnimFor(el);
+  // Multi-line text: one draw per line, each with its own animation preset and a horizontal band slice of the PNG.
+  if (el.lineCount > 1 && (!el.keyArtSlot)) {
+    for (var i = 0; i < el.lineCount; i++) drawTextLine(c, el, i, t);
+    return;
+  }
+  drawSingle(c, el, null, t);
+}
+
+function drawSingle(c, el, lineIndex, t) {
+  var a = getAnimFor(el, lineIndex);
   var opacity = 1, offsetX = 0, offsetY = 0, scaleVal = 1, clipFrac = 1;
   if (a.type !== "none") {
     var p = getAnimProgress(t, a.start, a.duration, a.easing);
@@ -472,8 +496,6 @@ function drawElement(c, el, t) {
     c.beginPath(); c.rect(dx, dy, dw * clipFrac, dh); c.clip();
   }
 
-  // Key Art video replacement: if this element is a Key Art slot and a video is loaded,
-  // draw the video (cover-fit) into the exact rect the static image would occupy.
   var kv = el.keyArtSlot ? state.keyArtVideos[el.keyArtSlot] : null;
   if (kv && kv.video && kv.video.readyState >= 2) {
     c.save();
@@ -483,6 +505,48 @@ function drawElement(c, el, t) {
   } else {
     c.drawImage(el.img, dx, dy, dw, dh);
   }
+  c.restore();
+}
+
+// Draw a single line of a multi-line text element as a horizontal band slice of its PNG,
+// positioned at (el.y + i * bandHeight) with its own animation preset applied.
+function drawTextLine(c, el, i, t) {
+  var a = getAnimFor(el, i);
+  var opacity = 1, offsetX = 0, offsetY = 0, scaleVal = 1, clipFrac = 1;
+  if (a.type !== "none") {
+    var p = getAnimProgress(t, a.start, a.duration, a.easing);
+    switch (a.type) {
+      case "fadeIn": opacity = p; break;
+      case "slideLeft": offsetX = -a.distance * (1 - p); opacity = p; break;
+      case "slideRight": offsetX = a.distance * (1 - p); opacity = p; break;
+      case "slideUp": offsetY = a.distance * (1 - p); opacity = p; break;
+      case "slideDown": offsetY = -a.distance * (1 - p); opacity = p; break;
+      case "scaleIn": scaleVal = 0.3 + 0.7 * p; opacity = p; break;
+      case "textReveal": clipFrac = p; break;
+    }
+  }
+  if (opacity <= 0 && a.type !== "textReveal") return;
+
+  var dw = el.renderW;
+  var dh = el.bandHeight;
+  var dx = el.x + offsetX;
+  var dy = el.y + i * el.bandHeight + offsetY;
+
+  // Source band on the PNG, at EXPORT_SCALE resolution.
+  var sy = Math.round(i * el.bandHeight * EXPORT_SCALE);
+  var sh = Math.round(el.bandHeight * EXPORT_SCALE);
+  var sw = el.img.naturalWidth;
+
+  c.save();
+  c.globalAlpha = Math.max(0, Math.min(1, opacity));
+  if (scaleVal !== 1) {
+    var cx = dx + dw / 2, cy = dy + dh / 2;
+    c.translate(cx, cy); c.scale(scaleVal, scaleVal); c.translate(-cx, -cy);
+  }
+  if (a.type === "textReveal" && clipFrac < 1) {
+    c.beginPath(); c.rect(dx, dy, dw * clipFrac, dh); c.clip();
+  }
+  c.drawImage(el.img, 0, sy, sw, sh, dx, dy, dw, dh);
   c.restore();
 }
 
@@ -511,6 +575,7 @@ window.onmessage = function(event) {
     state.frames = [];
     state.selectedFrameIndex = -1;
     state.selectedElementIndex = -1;
+    state.selectedLineIndex = null;
     // Key Art videos persist across loads on purpose? Reset to avoid stale slots for a new section.
     Object.keys(state.keyArtVideos).forEach(function(k) {
       var kv = state.keyArtVideos[k];
@@ -570,6 +635,7 @@ window.onmessage = function(event) {
           var renderW = img.naturalWidth / EXPORT_SCALE;
           var renderH = img.naturalHeight / EXPORT_SCALE;
           var slot = detectKeyArtSlot(data.name);
+          var lineCount = (data.lines && data.lines.length > 1) ? data.lines.length : 1;
           var el = {
             id: data.id, name: data.name, nodeType: data.nodeType,
             normalizedName: normalizeName(data.name),
@@ -577,6 +643,9 @@ window.onmessage = function(event) {
             x: data.x, y: data.y,
             renderW: renderW, renderH: renderH,
             img: img, isText: data.isText, textContent: data.textContent,
+            lines: data.lines || null,
+            lineCount: lineCount,
+            bandHeight: renderH / lineCount,
             visible: data.visible
           };
           frameRef.elements.push(el);
@@ -654,6 +723,7 @@ function selectFrame(index) {
   if (index < 0 || index >= state.frames.length) return;
   state.selectedFrameIndex = index;
   state.selectedElementIndex = -1;
+  state.selectedLineIndex = null;
   renderVariantList();
   // Rebuild element list for this variant.
   $("elementList").innerHTML = "";
@@ -665,35 +735,76 @@ function selectFrame(index) {
 }
 
 // ── ELEMENT LIST ──
+// Rows are flat DOM items each tagged with (elementIndex, lineIndex | -1).
+// Multi-line text expands into a parent header (not selectable) + one row per line.
 function addElementToList(el, index) {
+  if (el.lineCount > 1) {
+    var header = document.createElement("div");
+    header.className = "element-item is-parent-header";
+    header.dataset.index = index; header.dataset.line = "-1";
+    var hn = document.createElement("div"); hn.className = "el-name"; hn.textContent = el.name;
+    var cnt = document.createElement("span"); cnt.className = "el-anim-badge"; cnt.style.background = "var(--text-secondary)";
+    cnt.textContent = el.lineCount + " lines"; hn.appendChild(cnt);
+    header.appendChild(hn);
+    var hm = document.createElement("div"); hm.className = "el-meta";
+    hm.textContent = el.nodeType + " · " + Math.round(el.renderW) + "x" + Math.round(el.renderH) + " · multi-line";
+    header.appendChild(hm);
+    $("elementList").appendChild(header);
+    for (var li = 0; li < el.lineCount; li++) {
+      (function(lineIdx) {
+        var row = document.createElement("div");
+        row.className = "element-item is-line-child";
+        row.dataset.index = index; row.dataset.line = String(lineIdx);
+        var n = document.createElement("div"); n.className = "el-name";
+        n.textContent = "Line " + (lineIdx + 1) + ": " + (el.lines[lineIdx] || "").slice(0, 40);
+        row.appendChild(n);
+        var m = document.createElement("div"); m.className = "el-meta";
+        m.textContent = "band " + Math.round(el.bandHeight) + "px";
+        row.appendChild(m);
+        row.addEventListener("click", function() { selectElement(index, lineIdx); });
+        $("elementList").appendChild(row);
+        refreshBadgesForItem(row, el, lineIdx);
+      })(li);
+    }
+    return;
+  }
+
   var div = document.createElement("div");
-  div.className = "element-item"; div.dataset.index = index;
+  div.className = "element-item"; div.dataset.index = index; div.dataset.line = "-1";
   var nameWrap = document.createElement("div"); nameWrap.className = "el-name"; nameWrap.textContent = el.name;
   if (el.keyArtSlot) {
     var ka = document.createElement("span"); ka.className = "el-keyart-badge"; ka.textContent = el.keyArtSlot;
     nameWrap.appendChild(ka);
   }
   div.appendChild(nameWrap);
-  var m = document.createElement("div"); m.className = "el-meta";
-  m.textContent = el.nodeType + " · " + Math.round(el.renderW) + "x" + Math.round(el.renderH);
-  if (el.isText) m.textContent += " · Text";
-  div.appendChild(m);
-  div.addEventListener("click", function() { selectElement(index); });
+  var m2 = document.createElement("div"); m2.className = "el-meta";
+  m2.textContent = el.nodeType + " · " + Math.round(el.renderW) + "x" + Math.round(el.renderH);
+  if (el.isText) m2.textContent += " · Text";
+  div.appendChild(m2);
+  div.addEventListener("click", function() { selectElement(index, null); });
   $("elementList").appendChild(div);
-  refreshBadgesForItem(div, el);
+  refreshBadgesForItem(div, el, null);
 }
 
-function selectElement(index) {
+function selectElement(index, lineIndex) {
   state.selectedElementIndex = index;
+  state.selectedLineIndex = (lineIndex == null ? null : lineIndex);
   var items = document.querySelectorAll(".element-item");
-  for (var i = 0; i < items.length; i++) items[i].classList.remove("selected");
-  if (items[index]) items[index].classList.add("selected");
+  for (var i = 0; i < items.length; i++) {
+    items[i].classList.remove("selected");
+    var idx = parseInt(items[i].dataset.index, 10);
+    var ln = parseInt(items[i].dataset.line, 10);
+    if (idx === index && ln === (lineIndex == null ? -1 : lineIndex)) items[i].classList.add("selected");
+  }
   var f = currentFrame(); if (!f) { $("animConfig").style.display = "none"; return; }
   var el = f.elements[index];
   if (!el) { $("animConfig").style.display = "none"; return; }
-  var a = getAnimFor(el);
+  var a = getAnimFor(el, state.selectedLineIndex);
   $("animConfig").style.display = "block";
-  $("animTitle").textContent = "Animate: " + el.name + (el.keyArtSlot ? "  (" + el.keyArtSlot + ")" : "");
+  var title = "Animate: " + el.name;
+  if (state.selectedLineIndex != null) title += " · Line " + (state.selectedLineIndex + 1);
+  if (el.keyArtSlot) title += "  (" + el.keyArtSlot + ")";
+  $("animTitle").textContent = title;
   $("animType").value = a.type;
   $("animEasing").value = a.easing;
   $("animStart").value = a.start;
@@ -701,25 +812,31 @@ function selectElement(index) {
   $("animDistance").value = a.distance;
 }
 
-function refreshBadgesForItem(itemEl, el) {
-  var existing = itemEl.querySelector(".el-anim-badge"); if (existing) existing.remove();
-  var a = state.animPresets[el.normalizedName];
+function refreshBadgesForItem(itemEl, el, lineIndex) {
+  var existing = itemEl.querySelector(".el-anim-badge[data-anim='1']"); if (existing) existing.remove();
+  var a = state.animPresets[animKey(el, lineIndex)];
   if (a && a.type !== "none") {
     var badge = document.createElement("span");
-    badge.className = "el-anim-badge"; badge.textContent = a.type;
+    badge.className = "el-anim-badge"; badge.setAttribute("data-anim", "1"); badge.textContent = a.type;
     itemEl.querySelector(".el-name").appendChild(badge);
   }
 }
 function refreshBadges() {
   var f = currentFrame(); if (!f) return;
   var items = document.querySelectorAll(".element-item");
-  for (var i = 0; i < items.length && i < f.elements.length; i++) refreshBadgesForItem(items[i], f.elements[i]);
+  for (var i = 0; i < items.length; i++) {
+    var idx = parseInt(items[i].dataset.index, 10);
+    var ln = parseInt(items[i].dataset.line, 10);
+    var el = f.elements[idx]; if (!el) continue;
+    if (ln < 0 && el.lineCount > 1) continue; // parent header has no preset
+    refreshBadgesForItem(items[i], el, ln < 0 ? null : ln);
+  }
 }
 
-function applyAnimToElement(index) {
+function applyAnimToElement(index, lineIndex) {
   var f = currentFrame(); if (!f) return;
   var el = f.elements[index]; if (!el) return;
-  state.animPresets[el.normalizedName] = {
+  state.animPresets[animKey(el, lineIndex)] = {
     type: $("animType").value,
     easing: $("animEasing").value,
     start: parseFloat($("animStart").value) || 0,
@@ -727,7 +844,8 @@ function applyAnimToElement(index) {
     distance: parseFloat($("animDistance").value) || 100
   };
   refreshBadges(); renderFrame(state.currentTime);
-  log("Applied " + state.animPresets[el.normalizedName].type + " to '" + el.name + "' (across set)");
+  var label = el.name + (lineIndex != null ? " · Line " + (lineIndex + 1) : "");
+  log("Applied " + state.animPresets[animKey(el, lineIndex)].type + " to '" + label + "' (across set)");
 }
 
 // ── PLAYBACK ──
@@ -1078,33 +1196,44 @@ $("btnLoop").addEventListener("click", function() {
   state.looping = !state.looping; this.classList.toggle("active", state.looping);
   log("Loop: " + (state.looping ? "ON" : "OFF"));
 });
-$("btnApplyAnim").addEventListener("click", function() { if (state.selectedElementIndex >= 0) applyAnimToElement(state.selectedElementIndex); });
+$("btnApplyAnim").addEventListener("click", function() {
+  if (state.selectedElementIndex >= 0) applyAnimToElement(state.selectedElementIndex, state.selectedLineIndex);
+});
 $("btnApplyAll").addEventListener("click", function() {
-  // Apply to every distinct element (by normalized name) across the whole set, stagger start times.
+  // Apply to every distinct preset slot across the set (each multi-line text contributes N slots), stagger.
   var type = $("animType").value, easing = $("animEasing").value;
   var dur = parseFloat($("animDuration").value) || 0.5;
   var dist = parseFloat($("animDistance").value) || 100;
   var seen = {}, order = [];
   for (var fi = 0; fi < state.frames.length; fi++) {
-    for (var ei = 0; ei < state.frames[fi].elements.length; ei++) {
-      var nn = state.frames[fi].elements[ei].normalizedName;
-      if (!seen[nn]) { seen[nn] = true; order.push(nn); }
+    var els = state.frames[fi].elements;
+    for (var ei = 0; ei < els.length; ei++) {
+      var el = els[ei];
+      if (el.lineCount > 1) {
+        for (var li = 0; li < el.lineCount; li++) {
+          var k = animKey(el, li);
+          if (!seen[k]) { seen[k] = true; order.push(k); }
+        }
+      } else {
+        var kk = animKey(el, null);
+        if (!seen[kk]) { seen[kk] = true; order.push(kk); }
+      }
     }
   }
-  for (var k = 0; k < order.length; k++) {
-    state.animPresets[order[k]] = {
-      type: type, easing: easing, duration: dur, distance: dist, start: k * 0.15
+  for (var k2 = 0; k2 < order.length; k2++) {
+    state.animPresets[order[k2]] = {
+      type: type, easing: easing, duration: dur, distance: dist, start: k2 * 0.15
     };
   }
   refreshBadges(); renderFrame(state.currentTime);
-  log("Applied " + type + " to all (" + order.length + " distinct elements)");
+  log("Applied " + type + " to all (" + order.length + " slots)");
 });
 $("btnClearAnim").addEventListener("click", function() {
   var f = currentFrame();
   if (f && state.selectedElementIndex >= 0) {
     var el = f.elements[state.selectedElementIndex];
     if (el) {
-      delete state.animPresets[el.normalizedName];
+      delete state.animPresets[animKey(el, state.selectedLineIndex)];
       $("animType").value = "none";
       refreshBadges(); renderFrame(state.currentTime);
     }

@@ -75,7 +75,14 @@ async function exportFrameChildren(frame, frameIndex, frameTotal) {
 
       var isText = child.type === "TEXT";
       var textContent = "";
-      if (isText) { try { textContent = child.characters; } catch (e) {} }
+      var lines = null;
+      if (isText) {
+        try { textContent = child.characters; } catch (e) {}
+        // Explicit line breaks only. Auto-wrapped lines aren't exposed by the Figma read API.
+        if (textContent && textContent.indexOf("\n") !== -1) {
+          lines = textContent.split("\n");
+        }
+      }
 
       figma.ui.postMessage({
         type: "element-data",
@@ -91,6 +98,7 @@ async function exportFrameChildren(frame, frameIndex, frameTotal) {
           nodeX: child.x, nodeY: child.y, nodeW: child.width, nodeH: child.height,
           isText: isText,
           textContent: textContent,
+          lines: lines,
           opacity: child.opacity !== undefined ? child.opacity : 1,
           rotation: child.rotation || 0,
           visible: child.visible !== false,
