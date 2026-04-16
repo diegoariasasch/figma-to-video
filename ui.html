@@ -849,6 +849,12 @@ function applyAnimToElement(index, lineIndex) {
 }
 
 // ── PLAYBACK ──
+function forEachKeyArtVideo(fn) {
+  Object.keys(state.keyArtVideos).forEach(function(k) {
+    var kv = state.keyArtVideos[k];
+    if (kv && kv.video) { try { fn(kv); } catch (e) {} }
+  });
+}
 function startPlayback() {
   if (state.playing) return;
   var dur = parseFloat($("videoDuration").value) || 6;
@@ -859,6 +865,11 @@ function startPlayback() {
   $("btnPlay").innerHTML = "&#10074;&#10074;";
   if (state.bgVideo) { state.bgVideo.currentTime = state.currentTime; state.bgVideo.play().catch(function(){}); }
   if (state.bgAudio) { state.bgAudio.currentTime = state.currentTime; state.bgAudio.play().catch(function(){}); }
+  forEachKeyArtVideo(function(kv) {
+    var vdur = kv.video.duration || 0;
+    kv.video.currentTime = (kv.loop !== false && vdur) ? (state.currentTime % vdur) : Math.min(state.currentTime, vdur || state.currentTime);
+    kv.video.play().catch(function(){});
+  });
   playLoop();
 }
 function stopPlayback() {
@@ -868,8 +879,13 @@ function stopPlayback() {
   $("btnPlay").innerHTML = "&#9654;";
   if (state.bgVideo) state.bgVideo.pause();
   if (state.bgAudio) state.bgAudio.pause();
+  forEachKeyArtVideo(function(kv) { kv.video.pause(); });
 }
-function resetPlayback() { stopPlayback(); state.currentTime = 0; updateTimeUI(); renderFrame(0); }
+function resetPlayback() {
+  stopPlayback(); state.currentTime = 0; updateTimeUI();
+  forEachKeyArtVideo(function(kv) { kv.video.currentTime = 0; });
+  renderFrame(0);
+}
 function playLoop() {
   if (!state.playing) return;
   var elapsed = (performance.now() - state.playStartWall) / 1000;
@@ -880,6 +896,7 @@ function playLoop() {
       state.currentTime = 0; state.playStartWall = performance.now(); state.playStartTime = 0;
       if (state.bgVideo) state.bgVideo.currentTime = 0;
       if (state.bgAudio) state.bgAudio.currentTime = 0;
+      forEachKeyArtVideo(function(kv) { kv.video.currentTime = 0; });
     } else {
       state.currentTime = dur; renderFrame(state.currentTime); updateTimeUI(); stopPlayback(); return;
     }
@@ -1116,7 +1133,10 @@ async function exportVariant(frame, variantIndex, variantTotal, mimeType, bitrat
 
     var vt = stream.getVideoTracks()[0];
     if (vt && vt.requestFrame) vt.requestFrame();
-    await new Promise(function(r) { setTimeout(r, 1); });
+    // MediaRecorder timestamps frames by wall-clock time. Pace at 1000/fps so the
+    // recorded timeline matches the nominal duration; otherwise all frames arrive
+    // back-to-back and the resulting file spans only a few hundred ms.
+    await new Promise(function(r) { setTimeout(r, 1000 / fps); });
   }
 
   recorder.stop(); await done;
@@ -1250,6 +1270,14 @@ $("timelineTrack").addEventListener("click", function(e) {
   var rect = this.getBoundingClientRect();
   var dur = parseFloat($("videoDuration").value) || 6;
   state.currentTime = Math.max(0, Math.min(dur, ((e.clientX - rect.left) / rect.width) * dur));
+  if (state.bgVideo) state.bgVideo.currentTime = state.currentTime;
+  if (state.bgAudio) state.bgAudio.currentTime = state.currentTime;
+  forEachKeyArtVideo(function(kv) {
+    var vdur = kv.video.duration || 0;
+    kv.video.currentTime = (kv.loop !== false && vdur) ? (state.currentTime % vdur) : Math.min(state.currentTime, vdur || state.currentTime);
+  });
+  // If already playing, realign the wall-clock anchor so playback continues smoothly from the scrubbed position.
+  if (state.playing) { state.playStartWall = performance.now(); state.playStartTime = state.currentTime; }
   updateTimeUI(); renderFrame(state.currentTime);
 });
 $("videoDuration").addEventListener("change", function() { state.duration = parseFloat(this.value) || 6; updateTimeUI(); });
