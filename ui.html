@@ -68,6 +68,44 @@
   select:focus, input:focus { border-color: var(--accent); }
   input[type="range"] { width: 100%; cursor: pointer; }
   label { font-size: 11px; color: var(--text-secondary); display: block; margin-bottom: 3px; }
+  .variant-list {
+    max-height: 35%; overflow-y: auto; border-bottom: 1px solid var(--border); flex-shrink: 0;
+  }
+  .variant-item {
+    padding: 6px 12px; border-bottom: 1px solid var(--border);
+    cursor: pointer; transition: background 0.1s;
+  }
+  .variant-item:hover { background: rgba(255,255,255,0.04); }
+  .variant-item.selected { background: rgba(91,110,245,0.15); border-left: 3px solid var(--accent); }
+  .variant-item .variant-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-bottom: 3px;
+  }
+  .variant-item .variant-title {
+    font-size: 11px; font-weight: 500;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1;
+  }
+  .variant-item .variant-dims { font-size: 10px; color: var(--text-secondary); white-space: nowrap; }
+  .variant-item .variant-name-input {
+    width: 100%; font-size: 10px; padding: 3px 5px;
+  }
+  .keyart-slot {
+    padding: 8px; border: 1px solid var(--border); border-radius: var(--radius);
+    margin-bottom: 8px; background: rgba(0,0,0,0.1);
+  }
+  .keyart-slot-head {
+    font-size: 11px; font-weight: 600; color: var(--accent);
+    text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;
+  }
+  .keyart-slot .file-drop { padding: 8px; font-size: 10px; margin-bottom: 4px; }
+  .keyart-controls {
+    display: flex; align-items: center; justify-content: space-between; gap: 6px;
+    margin-top: 4px; font-size: 10px;
+  }
+  .el-keyart-badge {
+    display: inline-block; font-size: 9px; padding: 1px 5px;
+    border-radius: 3px; background: var(--warning); color: #000;
+    margin-left: 4px; text-transform: uppercase; letter-spacing: 0.3px; font-weight: 600;
+  }
   .element-list { flex: 1; overflow-y: auto; }
   .element-item {
     padding: 8px 12px; border-bottom: 1px solid var(--border);
@@ -153,15 +191,19 @@
 <body>
 <div class="app">
   <div class="toolbar">
-    <button class="btn-primary" id="btnLoadFrame">Load Selected Frame</button>
-    <span id="frameName" style="flex:1; color:var(--text-secondary);">No frame loaded</span>
+    <button class="btn-primary" id="btnLoadFrame">Load Selection</button>
+    <span id="frameName" style="flex:1; color:var(--text-secondary);">No selection loaded</span>
     <span id="frameSize" style="color:var(--text-secondary); font-size:11px;"></span>
   </div>
   <div class="main">
     <div class="panel-left">
-      <div style="padding:8px 12px; font-weight:600; font-size:11px; color:var(--text-secondary); text-transform:uppercase; letter-spacing:0.5px; border-bottom:1px solid var(--border);">Elements</div>
+      <div style="padding:8px 12px; font-weight:600; font-size:11px; color:var(--text-secondary); text-transform:uppercase; letter-spacing:0.5px; border-bottom:1px solid var(--border);">Variants</div>
+      <div class="variant-list" id="variantList">
+        <div style="padding:12px; color:var(--text-secondary); font-size:10px;">Select a Section or Frame, then Load.</div>
+      </div>
+      <div style="padding:8px 12px; font-weight:600; font-size:11px; color:var(--text-secondary); text-transform:uppercase; letter-spacing:0.5px; border-bottom:1px solid var(--border); border-top:1px solid var(--border);">Elements</div>
       <div class="element-list" id="elementList">
-        <div style="padding:20px; text-align:center; color:var(--text-secondary);">Load a frame to see its elements</div>
+        <div style="padding:20px; text-align:center; color:var(--text-secondary); font-size:10px;">Load a frame to see its elements</div>
       </div>
       <div class="anim-config" id="animConfig" style="display:none;">
         <h3 id="animTitle">Animation</h3>
@@ -244,6 +286,12 @@
         </div>
       </div>
       <div class="section">
+        <h3>Key Art Videos</h3>
+        <div id="keyArtSlots">
+          <div style="font-size:10px; color:var(--text-secondary);">No Key Art layers detected. Name a layer "KeyArt 1", "KeyArt 2", etc. to enable a video slot.</div>
+        </div>
+      </div>
+      <div class="section">
         <h3>Background Video</h3>
         <div class="file-drop" id="dropVideo"><input type="file" id="inputVideo" accept="video/*">Click or drop video</div>
         <div style="margin-top:4px;"><label><input type="checkbox" id="chkVideoLoop" checked> Loop</label></div>
@@ -286,8 +334,16 @@ function log(text, level) {
 function setStatus(text) { $("statusBar").textContent = text; log(text); }
 
 // ── STATE ──
+// Frame-set aware: a selected Section can contain many variants.
+// frames[]: per-variant data. animPresets: shared across variants by normalized element name.
+// keyArtVideos: per Key Art slot (e.g. "keyart1"), shared across variants.
 var state = {
-  frame: null, elements: [], selectedIndex: -1,
+  section: { name: "" },
+  frames: [],                    // { id, name, exportName, width, height, bgColor, elements: [], childCount }
+  selectedFrameIndex: -1,
+  selectedElementIndex: -1,
+  animPresets: {},               // { normalizedName: { type, start, duration, easing, distance } }
+  keyArtVideos: {},              // { slotKey: { file, video, loop, opacity } }
   currentTime: 0, duration: 5,
   playing: false, looping: false,
   playRafId: null, playStartWall: 0, playStartTime: 0,
@@ -296,6 +352,18 @@ var state = {
   exporting: false, exportCancel: false
 };
 var EXPORT_SCALE = 2;
+
+function defaultAnim() { return { type: "none", start: 0, duration: 0.5, easing: "easeOut", distance: 100 }; }
+function normalizeName(n) { return (n || "").toLowerCase().replace(/\s+/g, ""); }
+function detectKeyArtSlot(name) {
+  var m = normalizeName(name).match(/^keyart(\d+)$/);
+  return m ? "keyart" + m[1] : null;
+}
+function sanitizeFilename(s) {
+  return (s || "").replace(/[\/\\:*?"<>|]+/g, "_").replace(/\s+/g, "_").replace(/_+/g, "_").replace(/^_+|_+$/g, "");
+}
+function currentFrame() { return state.selectedFrameIndex >= 0 ? state.frames[state.selectedFrameIndex] : null; }
+function getAnimFor(el) { return (el && state.animPresets[el.normalizedName]) || defaultAnim(); }
 
 // ── EASING ──
 var easings = {
@@ -310,30 +378,31 @@ var canvas = $("previewCanvas");
 var ctx = canvas.getContext("2d");
 
 function setupCanvas() {
-  if (!state.frame) return;
-  canvas.width = state.frame.width;
-  canvas.height = state.frame.height;
+  var f = currentFrame(); if (!f) return;
+  canvas.width = f.width;
+  canvas.height = f.height;
   log("Canvas: " + canvas.width + "x" + canvas.height);
   fitCanvasToArea();
 }
 function fitCanvasToArea() {
+  var f = currentFrame(); if (!f) return;
   var area = $("canvasArea");
   var aw = area.clientWidth - 24, ah = area.clientHeight - 24;
-  var s = Math.min(aw / state.frame.width, ah / state.frame.height, 1);
-  canvas.style.width = Math.round(state.frame.width * s) + "px";
-  canvas.style.height = Math.round(state.frame.height * s) + "px";
+  var s = Math.min(aw / f.width, ah / f.height, 1);
+  canvas.style.width = Math.round(f.width * s) + "px";
+  canvas.style.height = Math.round(f.height * s) + "px";
 }
-window.addEventListener("resize", function() { if (state.frame) fitCanvasToArea(); });
+window.addEventListener("resize", function() { if (currentFrame()) fitCanvasToArea(); });
 
 // ── RENDER ──
 function renderFrame(t) {
-  if (!state.frame) return;
+  var f = currentFrame(); if (!f) return;
   var w = canvas.width, h = canvas.height;
   ctx.clearRect(0, 0, w, h);
   ctx.save();
   ctx.beginPath(); ctx.rect(0, 0, w, h); ctx.clip();
 
-  ctx.fillStyle = state.frame.bgColor || "#000";
+  ctx.fillStyle = f.bgColor || "#000";
   ctx.fillRect(0, 0, w, h);
 
   if (state.bgVideo && state.bgVideo.readyState >= 2) {
@@ -341,21 +410,31 @@ function renderFrame(t) {
     drawCover(ctx, state.bgVideo, w, h); ctx.restore();
   }
 
-  for (var i = 0; i < state.elements.length; i++) {
-    if (state.elements[i].visible) drawElement(ctx, state.elements[i], t);
+  for (var i = 0; i < f.elements.length; i++) {
+    if (f.elements[i].visible) drawElement(ctx, f.elements[i], t);
   }
   ctx.restore();
 }
 
 function drawCover(c, src, cw, ch) {
-  var sw = src.videoWidth || src.width, sh = src.videoHeight || src.height;
-  if (!sw || !sh) return;
-  var s = Math.max(cw / sw, ch / sh);
-  c.drawImage(src, (cw - sw * s) / 2, (ch - sh * s) / 2, sw * s, sh * s);
+  drawCoverInto(c, src, 0, 0, cw, ch);
+}
+
+// Cover-fit `src` into the rect (dx,dy,dw,dh) — center-cropped, aspect preserved.
+function drawCoverInto(c, src, dx, dy, dw, dh) {
+  var sw = src.videoWidth || src.naturalWidth || src.width;
+  var sh = src.videoHeight || src.naturalHeight || src.height;
+  if (!sw || !sh || dw <= 0 || dh <= 0) return;
+  var s = Math.max(dw / sw, dh / sh);
+  var drawW = sw * s, drawH = sh * s;
+  c.save();
+  c.beginPath(); c.rect(dx, dy, dw, dh); c.clip();
+  c.drawImage(src, dx + (dw - drawW) / 2, dy + (dh - drawH) / 2, drawW, drawH);
+  c.restore();
 }
 
 function drawElement(c, el, t) {
-  var a = el.anim;
+  var a = getAnimFor(el);
   var opacity = 1, offsetX = 0, offsetY = 0, scaleVal = 1, clipFrac = 1;
   if (a.type !== "none") {
     var p = getAnimProgress(t, a.start, a.duration, a.easing);
@@ -374,8 +453,6 @@ function drawElement(c, el, t) {
   c.save();
   c.globalAlpha = Math.max(0, Math.min(1, opacity));
 
-  // Use renderW/renderH (actual image dims / scale) for correct proportions
-  // Use el.x/el.y from absoluteRenderBounds for correct position
   var dw = el.renderW, dh = el.renderH;
   var dx = el.x + offsetX, dy = el.y + offsetY;
 
@@ -386,7 +463,18 @@ function drawElement(c, el, t) {
   if (a.type === "textReveal" && clipFrac < 1) {
     c.beginPath(); c.rect(dx, dy, dw * clipFrac, dh); c.clip();
   }
-  c.drawImage(el.img, dx, dy, dw, dh);
+
+  // Key Art video replacement: if this element is a Key Art slot and a video is loaded,
+  // draw the video (cover-fit) into the exact rect the static image would occupy.
+  var kv = el.keyArtSlot ? state.keyArtVideos[el.keyArtSlot] : null;
+  if (kv && kv.video && kv.video.readyState >= 2) {
+    c.save();
+    c.globalAlpha *= (kv.opacity != null ? kv.opacity : 1);
+    drawCoverInto(c, kv.video, dx, dy, dw, dh);
+    c.restore();
+  } else {
+    c.drawImage(el.img, dx, dy, dw, dh);
+  }
   c.restore();
 }
 
@@ -408,113 +496,230 @@ window.onmessage = function(event) {
     $("loadOverlay").querySelector("div").textContent = msg.message;
     return;
   }
-  if (msg.type === "frame-info") {
+
+  if (msg.type === "section-info") {
     var d = msg.data;
-    log("frame-info: " + d.name + " " + d.width + "x" + d.height + " bg:" + d.bgColor + " children:" + d.childCount);
-    state.frame = { name: d.name, width: d.width, height: d.height, bgColor: d.bgColor };
-    state.elements = []; state.selectedIndex = -1;
-    $("frameName").textContent = d.name;
-    $("frameSize").textContent = d.width + " x " + d.height;
-    $("elementList").innerHTML = "";
+    state.section.name = d.sectionName || "";
+    state.frames = [];
+    state.selectedFrameIndex = -1;
+    state.selectedElementIndex = -1;
+    // Key Art videos persist across loads on purpose? Reset to avoid stale slots for a new section.
+    Object.keys(state.keyArtVideos).forEach(function(k) {
+      var kv = state.keyArtVideos[k];
+      try { if (kv.video) { kv.video.pause(); } } catch (e) {}
+    });
+    state.keyArtVideos = {};
+
+    for (var i = 0; i < d.frames.length; i++) {
+      var fi = d.frames[i];
+      var defaultName = sanitizeFilename((state.section.name ? state.section.name + "_" : "") + fi.name) || ("variant_" + (i + 1));
+      state.frames.push({
+        id: fi.id, name: fi.name, exportName: defaultName,
+        width: fi.width, height: fi.height, bgColor: fi.bgColor,
+        elements: [], childCount: 0
+      });
+    }
+    log("section-info: '" + state.section.name + "' with " + state.frames.length + " frame(s)");
+
+    $("frameName").textContent = state.section.name ? state.section.name + " · " + state.frames.length + " frames" : (state.frames[0] ? state.frames[0].name : "");
+    $("frameSize").textContent = "";
     $("loadOverlay").classList.remove("hidden");
-    $("loadOverlay").querySelector("div").textContent = "Loading " + d.childCount + " elements...";
-    setupCanvas();
+    $("loadOverlay").querySelector("div").textContent = "Loading " + state.frames.length + " frame(s)...";
+
+    renderVariantList();
+    rebuildKeyArtSlotsPanel();
+    // Preselect first variant so the canvas shows something while elements stream in.
+    if (state.frames.length > 0) {
+      selectFrame(0);
+    } else {
+      $("elementList").innerHTML = "";
+    }
     return;
   }
+
+  if (msg.type === "frame-start") {
+    var d = msg.data;
+    var f = state.frames[d.frameIndex];
+    if (!f) return;
+    f.childCount = d.childCount;
+    log("frame-start: " + d.name + " " + d.width + "x" + d.height + " children:" + d.childCount);
+    $("loadOverlay").querySelector("div").textContent =
+      "Frame " + (d.frameIndex + 1) + "/" + d.frameTotal + ": " + d.name + " (" + d.childCount + " elements)";
+    return;
+  }
+
   if (msg.type === "element-data") {
     var d = msg.data;
-    log("element-data: " + d.name + " [" + d.nodeType + "] pos:(" + d.x.toFixed(1) + "," + d.y.toFixed(1) + ") bounds:" + d.width.toFixed(0) + "x" + d.height.toFixed(0));
+    var f = state.frames[d.frameIndex];
+    if (!f) { log("element-data for unknown frameIndex " + d.frameIndex, "warn"); return; }
     try {
       var bytes = new Uint8Array(d.imageBytes);
       var blob = new Blob([bytes], { type: "image/png" });
       var url = URL.createObjectURL(blob);
       var img = new Image();
-      img.onload = function() {
-        var renderW = img.naturalWidth / EXPORT_SCALE;
-        var renderH = img.naturalHeight / EXPORT_SCALE;
-        log("  img loaded: " + d.name + " natural:" + img.naturalWidth + "x" + img.naturalHeight +
-            " render:" + renderW.toFixed(1) + "x" + renderH.toFixed(1) +
-            " arb:" + d.width.toFixed(1) + "x" + d.height.toFixed(1));
-
-        var el = {
-          id: d.id, name: d.name, nodeType: d.nodeType,
-          // Position from absoluteRenderBounds (relative to frame)
-          x: d.x, y: d.y,
-          // Render dimensions from actual image (most accurate)
-          renderW: renderW, renderH: renderH,
-          img: img, isText: d.isText, textContent: d.textContent,
-          visible: d.visible,
-          anim: { type: "none", start: 0, duration: 0.5, easing: "easeOut", distance: 100 }
+      (function(frameRef, data) {
+        img.onload = function() {
+          var renderW = img.naturalWidth / EXPORT_SCALE;
+          var renderH = img.naturalHeight / EXPORT_SCALE;
+          var slot = detectKeyArtSlot(data.name);
+          var el = {
+            id: data.id, name: data.name, nodeType: data.nodeType,
+            normalizedName: normalizeName(data.name),
+            keyArtSlot: slot,
+            x: data.x, y: data.y,
+            renderW: renderW, renderH: renderH,
+            img: img, isText: data.isText, textContent: data.textContent,
+            visible: data.visible
+          };
+          frameRef.elements.push(el);
+          if (state.selectedFrameIndex === data.frameIndex) addElementToList(el, frameRef.elements.length - 1);
+          renderFrame(state.currentTime);
+          $("loadOverlay").querySelector("div").textContent =
+            "Frame " + (data.frameIndex + 1) + ": " + (data.index + 1) + " / " + data.total;
         };
-        state.elements.push(el);
-        addElementToList(el, state.elements.length - 1);
-        renderFrame(state.currentTime);
-        $("loadOverlay").querySelector("div").textContent = "Loaded " + (d.index + 1) + " / " + d.total;
-      };
+      })(f, d);
       img.onerror = function() { log("Image FAILED: " + d.name, "err"); };
       img.src = url;
     } catch (e) { log("Error processing " + d.name + ": " + e.message, "err"); }
     return;
   }
+
+  if (msg.type === "frame-end") {
+    log("frame-end: " + msg.data.frameIndex);
+    return;
+  }
+
   if (msg.type === "element-error") { log("Export error: " + msg.data.name + " - " + msg.data.error, "warn"); return; }
+
   if (msg.type === "load-complete") {
-    log("Load complete! " + state.elements.length + " elements.");
+    var total = 0;
+    for (var fi2 = 0; fi2 < state.frames.length; fi2++) total += state.frames[fi2].elements.length;
+    log("Load complete! " + state.frames.length + " variant(s), " + total + " elements.");
     $("loadOverlay").classList.add("hidden");
-    $("btnExport").disabled = false;
-    setStatus("Loaded " + state.elements.length + " elements from " + state.frame.name);
+    $("btnExport").disabled = state.frames.length === 0;
+    setStatus("Loaded " + state.frames.length + " variant(s), " + total + " elements");
+    rebuildKeyArtSlotsPanel();
+    renderVariantList();
     renderFrame(0);
     return;
   }
 };
 
+// ── VARIANTS LIST ──
+function renderVariantList() {
+  var container = $("variantList");
+  if (!container) return;
+  container.innerHTML = "";
+  if (state.frames.length === 0) {
+    container.innerHTML = '<div style="padding:12px; color:var(--text-secondary); font-size:10px;">Select a Section or Frame, then Load.</div>';
+    return;
+  }
+  for (var i = 0; i < state.frames.length; i++) {
+    (function(idx) {
+      var f = state.frames[idx];
+      var row = document.createElement("div");
+      row.className = "variant-item" + (idx === state.selectedFrameIndex ? " selected" : "");
+      row.addEventListener("click", function(e) {
+        if (e.target.tagName === "INPUT") return;
+        selectFrame(idx);
+      });
+      var head = document.createElement("div"); head.className = "variant-head";
+      var title = document.createElement("div"); title.className = "variant-title"; title.textContent = f.name;
+      var dims = document.createElement("div"); dims.className = "variant-dims"; dims.textContent = f.width + "×" + f.height;
+      head.appendChild(title); head.appendChild(dims);
+      var nameField = document.createElement("input");
+      nameField.type = "text"; nameField.className = "variant-name-input";
+      nameField.value = f.exportName;
+      nameField.title = "Export filename (no extension)";
+      nameField.addEventListener("input", function() {
+        state.frames[idx].exportName = sanitizeFilename(this.value) || ("variant_" + (idx + 1));
+      });
+      nameField.addEventListener("blur", function() { this.value = state.frames[idx].exportName; });
+      row.appendChild(head);
+      row.appendChild(nameField);
+      container.appendChild(row);
+    })(i);
+  }
+}
+
+function selectFrame(index) {
+  if (index < 0 || index >= state.frames.length) return;
+  state.selectedFrameIndex = index;
+  state.selectedElementIndex = -1;
+  renderVariantList();
+  // Rebuild element list for this variant.
+  $("elementList").innerHTML = "";
+  var f = state.frames[index];
+  for (var i = 0; i < f.elements.length; i++) addElementToList(f.elements[i], i);
+  $("animConfig").style.display = "none";
+  setupCanvas();
+  renderFrame(state.currentTime);
+}
+
 // ── ELEMENT LIST ──
 function addElementToList(el, index) {
   var div = document.createElement("div");
   div.className = "element-item"; div.dataset.index = index;
-  var n = document.createElement("div"); n.className = "el-name"; n.textContent = el.name; div.appendChild(n);
+  var nameWrap = document.createElement("div"); nameWrap.className = "el-name"; nameWrap.textContent = el.name;
+  if (el.keyArtSlot) {
+    var ka = document.createElement("span"); ka.className = "el-keyart-badge"; ka.textContent = el.keyArtSlot;
+    nameWrap.appendChild(ka);
+  }
+  div.appendChild(nameWrap);
   var m = document.createElement("div"); m.className = "el-meta";
   m.textContent = el.nodeType + " · " + Math.round(el.renderW) + "x" + Math.round(el.renderH);
   if (el.isText) m.textContent += " · Text";
   div.appendChild(m);
   div.addEventListener("click", function() { selectElement(index); });
   $("elementList").appendChild(div);
+  refreshBadgesForItem(div, el);
 }
+
 function selectElement(index) {
-  state.selectedIndex = index;
+  state.selectedElementIndex = index;
   var items = document.querySelectorAll(".element-item");
   for (var i = 0; i < items.length; i++) items[i].classList.remove("selected");
   if (items[index]) items[index].classList.add("selected");
-  var el = state.elements[index];
+  var f = currentFrame(); if (!f) { $("animConfig").style.display = "none"; return; }
+  var el = f.elements[index];
   if (!el) { $("animConfig").style.display = "none"; return; }
+  var a = getAnimFor(el);
   $("animConfig").style.display = "block";
-  $("animTitle").textContent = "Animate: " + el.name;
-  $("animType").value = el.anim.type;
-  $("animEasing").value = el.anim.easing;
-  $("animStart").value = el.anim.start;
-  $("animDuration").value = el.anim.duration;
-  $("animDistance").value = el.anim.distance;
+  $("animTitle").textContent = "Animate: " + el.name + (el.keyArtSlot ? "  (" + el.keyArtSlot + ")" : "");
+  $("animType").value = a.type;
+  $("animEasing").value = a.easing;
+  $("animStart").value = a.start;
+  $("animDuration").value = a.duration;
+  $("animDistance").value = a.distance;
 }
-function refreshBadges() {
-  var items = document.querySelectorAll(".element-item");
-  for (var i = 0; i < items.length; i++) {
-    var b = items[i].querySelector(".el-anim-badge"); if (b) b.remove();
-    var el = state.elements[i];
-    if (el && el.anim.type !== "none") {
-      var badge = document.createElement("span");
-      badge.className = "el-anim-badge"; badge.textContent = el.anim.type;
-      items[i].querySelector(".el-name").appendChild(badge);
-    }
+
+function refreshBadgesForItem(itemEl, el) {
+  var existing = itemEl.querySelector(".el-anim-badge"); if (existing) existing.remove();
+  var a = state.animPresets[el.normalizedName];
+  if (a && a.type !== "none") {
+    var badge = document.createElement("span");
+    badge.className = "el-anim-badge"; badge.textContent = a.type;
+    itemEl.querySelector(".el-name").appendChild(badge);
   }
 }
+function refreshBadges() {
+  var f = currentFrame(); if (!f) return;
+  var items = document.querySelectorAll(".element-item");
+  for (var i = 0; i < items.length && i < f.elements.length; i++) refreshBadgesForItem(items[i], f.elements[i]);
+}
+
 function applyAnimToElement(index) {
-  var el = state.elements[index]; if (!el) return;
-  el.anim.type = $("animType").value;
-  el.anim.easing = $("animEasing").value;
-  el.anim.start = parseFloat($("animStart").value) || 0;
-  el.anim.duration = parseFloat($("animDuration").value) || 0.5;
-  el.anim.distance = parseFloat($("animDistance").value) || 100;
+  var f = currentFrame(); if (!f) return;
+  var el = f.elements[index]; if (!el) return;
+  state.animPresets[el.normalizedName] = {
+    type: $("animType").value,
+    easing: $("animEasing").value,
+    start: parseFloat($("animStart").value) || 0,
+    duration: parseFloat($("animDuration").value) || 0.5,
+    distance: parseFloat($("animDistance").value) || 100
+  };
   refreshBadges(); renderFrame(state.currentTime);
-  log("Applied " + el.anim.type + " to " + el.name);
+  log("Applied " + state.animPresets[el.normalizedName].type + " to '" + el.name + "' (across set)");
 }
 
 // ── PLAYBACK ──
@@ -572,6 +777,107 @@ function setupFileDrop(dropId, inputId, onFile) {
   drop.addEventListener("dragleave", function() { drop.style.borderColor = ""; });
   drop.addEventListener("drop", function(e) { e.preventDefault(); drop.style.borderColor = ""; if (e.dataTransfer.files.length > 0) onFile(e.dataTransfer.files[0]); });
 }
+
+// ── KEY ART SLOTS ──
+function collectKeyArtSlots() {
+  var slots = {};
+  for (var i = 0; i < state.frames.length; i++) {
+    var els = state.frames[i].elements;
+    for (var j = 0; j < els.length; j++) {
+      if (els[j].keyArtSlot) slots[els[j].keyArtSlot] = true;
+    }
+  }
+  return Object.keys(slots).sort();
+}
+
+function rebuildKeyArtSlotsPanel() {
+  var container = $("keyArtSlots");
+  if (!container) return;
+  container.innerHTML = "";
+  var slots = collectKeyArtSlots();
+  if (slots.length === 0) {
+    container.innerHTML = '<div style="font-size:10px; color:var(--text-secondary);">No Key Art layers detected. Name a layer "KeyArt 1", "KeyArt 2", etc. to enable a video slot.</div>';
+    return;
+  }
+  slots.forEach(function(slot) {
+    var existing = state.keyArtVideos[slot];
+    var row = document.createElement("div");
+    row.className = "keyart-slot";
+    var header = document.createElement("div"); header.className = "keyart-slot-head"; header.textContent = slot;
+    row.appendChild(header);
+
+    var dropId = "dropKey_" + slot, inputId = "inputKey_" + slot;
+    var drop = document.createElement("div");
+    drop.className = "file-drop" + (existing && existing.file ? " has-file" : "");
+    drop.id = dropId;
+    drop.textContent = existing && existing.file ? existing.file.name : "Click or drop video";
+    var inp = document.createElement("input");
+    inp.type = "file"; inp.accept = "video/*"; inp.id = inputId;
+    drop.appendChild(inp);
+    row.appendChild(drop);
+
+    var controls = document.createElement("div"); controls.className = "keyart-controls";
+    var loopLbl = document.createElement("label");
+    loopLbl.innerHTML = '<input type="checkbox" ' + ((existing && existing.loop !== false) ? "checked" : "") + '> Loop';
+    controls.appendChild(loopLbl);
+    var removeBtn = document.createElement("button");
+    removeBtn.className = "btn-secondary"; removeBtn.textContent = "Remove";
+    removeBtn.style.fontSize = "10px"; removeBtn.style.padding = "3px 8px";
+    removeBtn.style.display = existing && existing.video ? "inline-block" : "none";
+    controls.appendChild(removeBtn);
+    row.appendChild(controls);
+
+    var opacityLbl = document.createElement("label");
+    opacityLbl.innerHTML = "Opacity";
+    opacityLbl.style.marginTop = "4px";
+    var opacityInput = document.createElement("input");
+    opacityInput.type = "range"; opacityInput.min = "0"; opacityInput.max = "1"; opacityInput.step = "0.05";
+    opacityInput.value = existing && existing.opacity != null ? existing.opacity : 1;
+    row.appendChild(opacityLbl);
+    row.appendChild(opacityInput);
+
+    container.appendChild(row);
+
+    setupFileDrop(dropId, inputId, function(file) { loadKeyArtVideo(slot, file); });
+    loopLbl.querySelector("input").addEventListener("change", function() {
+      var kv = state.keyArtVideos[slot];
+      if (kv) { kv.loop = this.checked; if (kv.video) kv.video.loop = this.checked; }
+      else state.keyArtVideos[slot] = { loop: this.checked, opacity: parseFloat(opacityInput.value) || 1 };
+    });
+    opacityInput.addEventListener("input", function() {
+      var kv = state.keyArtVideos[slot] || (state.keyArtVideos[slot] = { loop: true, opacity: 1 });
+      kv.opacity = parseFloat(this.value);
+      renderFrame(state.currentTime);
+    });
+    removeBtn.addEventListener("click", function() {
+      var kv = state.keyArtVideos[slot];
+      if (kv && kv.video) { try { kv.video.pause(); } catch (e) {} }
+      delete state.keyArtVideos[slot];
+      rebuildKeyArtSlotsPanel();
+      renderFrame(state.currentTime);
+    });
+  });
+}
+
+function loadKeyArtVideo(slot, file) {
+  var url = URL.createObjectURL(file);
+  var v = document.createElement("video");
+  var prev = state.keyArtVideos[slot] || {};
+  v.src = url; v.muted = true;
+  v.loop = prev.loop !== false;
+  v.playsInline = true; v.preload = "auto";
+  v.addEventListener("loadeddata", function() {
+    state.keyArtVideos[slot] = {
+      file: file, video: v,
+      loop: prev.loop !== false,
+      opacity: prev.opacity != null ? prev.opacity : 1
+    };
+    log("Key Art '" + slot + "' video loaded: " + file.name + " (" + v.videoWidth + "x" + v.videoHeight + ")");
+    rebuildKeyArtSlotsPanel();
+    renderFrame(state.currentTime);
+  });
+  v.load();
+}
 function loadVideo(file) {
   var url = URL.createObjectURL(file);
   var v = document.createElement("video");
@@ -597,30 +903,7 @@ function loadAudio(file) {
 }
 
 // ── EXPORT ──
-async function exportVideo() {
-  if (!state.frame || state.elements.length === 0) return;
-  state.exporting = true; state.exportCancel = false;
-  $("exportOverlay").classList.remove("hidden"); $("btnExport").disabled = true;
-  stopPlayback();
-
-  var dur = parseFloat($("videoDuration").value) || 5;
-  var fps = parseInt($("videoFps").value) || 30;
-  var totalFrames = Math.ceil(dur * fps);
-  var bitrateVal = (parseFloat($("exportBitrate").value) || 8) * 1000000;
-
-  var resOpt = $("videoResolution").value;
-  var expW = state.frame.width, expH = state.frame.height;
-  if (resOpt === "1080") { var s = 1080 / state.frame.height; expW = Math.round(state.frame.width * s); expH = 1080; }
-  else if (resOpt === "720") { var s2 = 720 / state.frame.height; expW = Math.round(state.frame.width * s2); expH = 720; }
-  if (expW % 2 !== 0) expW++;
-  if (expH % 2 !== 0) expH++;
-
-  log("Export: " + expW + "x" + expH + " @" + fps + "fps, " + totalFrames + " frames");
-
-  var offCanvas = document.createElement("canvas");
-  offCanvas.width = expW; offCanvas.height = expH;
-  var offCtx = offCanvas.getContext("2d");
-
+function pickMimeType() {
   var mimeType = "video/webm;codecs=vp9";
   if (typeof MediaRecorder !== "undefined") {
     if (MediaRecorder.isTypeSupported("video/mp4;codecs=avc1")) mimeType = "video/mp4;codecs=avc1";
@@ -628,7 +911,25 @@ async function exportVideo() {
     else if (MediaRecorder.isTypeSupported("video/webm;codecs=vp8")) mimeType = "video/webm;codecs=vp8";
     else if (MediaRecorder.isTypeSupported("video/webm")) mimeType = "video/webm";
   }
-  log("Codec: " + mimeType);
+  return mimeType;
+}
+
+function keyArtVideosArr() {
+  return Object.keys(state.keyArtVideos).map(function(k) { return state.keyArtVideos[k]; });
+}
+
+async function exportVariant(frame, variantIndex, variantTotal, mimeType, bitrateVal, dur, fps, totalFrames, resOpt) {
+  var expW = frame.width, expH = frame.height;
+  if (resOpt === "1080") { var s = 1080 / frame.height; expW = Math.round(frame.width * s); expH = 1080; }
+  else if (resOpt === "720") { var s2 = 720 / frame.height; expW = Math.round(frame.width * s2); expH = 720; }
+  if (expW % 2 !== 0) expW++;
+  if (expH % 2 !== 0) expH++;
+
+  log("Export variant " + (variantIndex + 1) + "/" + variantTotal + ": '" + frame.exportName + "' " + expW + "x" + expH);
+
+  var offCanvas = document.createElement("canvas");
+  offCanvas.width = expW; offCanvas.height = expH;
+  var offCtx = offCanvas.getContext("2d");
 
   var stream = offCanvas.captureStream(0);
   var audioCtx = null;
@@ -642,7 +943,6 @@ async function exportVideo() {
       src.connect(dest);
       dest.stream.getAudioTracks().forEach(function(trk) { stream.addTrack(trk); });
       clone.play().catch(function(){});
-      log("Audio mux OK");
     } catch (e) { log("Audio mux failed: " + e.message, "warn"); }
   }
 
@@ -652,32 +952,39 @@ async function exportVideo() {
   var done = new Promise(function(r) { recorder.onstop = r; });
   recorder.start();
   if (state.bgVideo) { state.bgVideo.pause(); state.bgVideo.currentTime = 0; }
+  var kvs = keyArtVideosArr();
+  kvs.forEach(function(kv) { if (kv.video) { try { kv.video.pause(); kv.video.currentTime = 0; } catch (e) {} } });
 
-  var sx = expW / state.frame.width, sy = expH / state.frame.height;
+  var sx = expW / frame.width, sy = expH / frame.height;
   for (var f = 0; f < totalFrames; f++) {
     if (state.exportCancel) break;
     var t = f / fps;
     var pct = ((f + 1) / totalFrames * 100).toFixed(0);
-    $("exportStatus").textContent = "Frame " + (f + 1) + "/" + totalFrames + " (" + pct + "%)";
+    $("exportStatus").textContent = "Variant " + (variantIndex + 1) + "/" + variantTotal + " · Frame " + (f + 1) + "/" + totalFrames + " (" + pct + "%)";
     $("exportProgress").style.width = pct + "%";
 
     if (state.bgVideo) {
       state.bgVideo.currentTime = state.bgVideoLoop ? t % state.bgVideo.duration : Math.min(t, state.bgVideo.duration);
     }
+    kvs.forEach(function(kv) {
+      if (!kv.video) return;
+      var vdur = kv.video.duration || 0;
+      kv.video.currentTime = (kv.loop !== false && vdur) ? (t % vdur) : Math.min(t, vdur);
+    });
 
     offCtx.save();
     offCtx.clearRect(0, 0, expW, expH);
     offCtx.beginPath(); offCtx.rect(0, 0, expW, expH); offCtx.clip();
     offCtx.scale(sx, sy);
-    offCtx.fillStyle = state.frame.bgColor || "#000";
-    offCtx.fillRect(0, 0, state.frame.width, state.frame.height);
+    offCtx.fillStyle = frame.bgColor || "#000";
+    offCtx.fillRect(0, 0, frame.width, frame.height);
     if (state.bgVideo && state.bgVideo.readyState >= 2) {
       offCtx.save(); offCtx.globalAlpha = state.bgVideoOpacity;
-      drawCover(offCtx, state.bgVideo, state.frame.width, state.frame.height);
+      drawCover(offCtx, state.bgVideo, frame.width, frame.height);
       offCtx.restore();
     }
-    for (var ei = 0; ei < state.elements.length; ei++) {
-      if (state.elements[ei].visible) drawElement(offCtx, state.elements[ei], t);
+    for (var ei = 0; ei < frame.elements.length; ei++) {
+      if (frame.elements[ei].visible) drawElement(offCtx, frame.elements[ei], t);
     }
     offCtx.restore();
 
@@ -694,10 +1001,52 @@ async function exportVideo() {
     var blob = new Blob(chunks, { type: mimeType.indexOf("mp4") >= 0 ? "video/mp4" : "video/webm" });
     var url = URL.createObjectURL(blob);
     var a = document.createElement("a"); a.href = url;
-    a.download = (state.frame.name || "video") + "." + ext; a.click();
+    var fname = (frame.exportName || ("variant_" + (variantIndex + 1))) + "." + ext;
+    a.download = fname; a.click();
     setTimeout(function() { URL.revokeObjectURL(url); }, 5000);
-    setStatus("Exported " + a.download + " (" + (blob.size / 1048576).toFixed(1) + " MB)");
-  } else { setStatus("Export cancelled."); }
+    log("Downloaded " + fname + " (" + (blob.size / 1048576).toFixed(1) + " MB)");
+    return { name: fname, size: blob.size };
+  }
+  return null;
+}
+
+async function exportVideo() {
+  if (state.frames.length === 0) return;
+  state.exporting = true; state.exportCancel = false;
+  $("exportOverlay").classList.remove("hidden"); $("btnExport").disabled = true;
+  stopPlayback();
+
+  var dur = parseFloat($("videoDuration").value) || 5;
+  var fps = parseInt($("videoFps").value) || 30;
+  var totalFrames = Math.ceil(dur * fps);
+  var bitrateVal = (parseFloat($("exportBitrate").value) || 8) * 1000000;
+  var resOpt = $("videoResolution").value;
+  var mimeType = pickMimeType();
+  log("Codec: " + mimeType + ", variants: " + state.frames.length);
+
+  var originalIndex = state.selectedFrameIndex;
+  var exportedCount = 0;
+  try {
+    for (var i = 0; i < state.frames.length; i++) {
+      if (state.exportCancel) break;
+      // Briefly switch UI to this variant so preview canvas reflects what's being exported.
+      state.selectedFrameIndex = i;
+      renderVariantList();
+      setupCanvas();
+      var result = await exportVariant(state.frames[i], i, state.frames.length, mimeType, bitrateVal, dur, fps, totalFrames, resOpt);
+      if (result) exportedCount++;
+      // Small pause between variants so browser has time to flush the download.
+      await new Promise(function(r) { setTimeout(r, 300); });
+    }
+  } finally {
+    state.selectedFrameIndex = originalIndex;
+    renderVariantList();
+    setupCanvas();
+    renderFrame(state.currentTime);
+  }
+
+  if (state.exportCancel) setStatus("Export cancelled after " + exportedCount + " variant(s).");
+  else setStatus("Exported " + exportedCount + " variant(s).");
   state.exporting = false; $("exportOverlay").classList.add("hidden"); $("btnExport").disabled = false;
 }
 
@@ -712,23 +1061,36 @@ $("btnLoop").addEventListener("click", function() {
   state.looping = !state.looping; this.classList.toggle("active", state.looping);
   log("Loop: " + (state.looping ? "ON" : "OFF"));
 });
-$("btnApplyAnim").addEventListener("click", function() { if (state.selectedIndex >= 0) applyAnimToElement(state.selectedIndex); });
+$("btnApplyAnim").addEventListener("click", function() { if (state.selectedElementIndex >= 0) applyAnimToElement(state.selectedElementIndex); });
 $("btnApplyAll").addEventListener("click", function() {
+  // Apply to every distinct element (by normalized name) across the whole set, stagger start times.
   var type = $("animType").value, easing = $("animEasing").value;
   var dur = parseFloat($("animDuration").value) || 0.5;
   var dist = parseFloat($("animDistance").value) || 100;
-  for (var i = 0; i < state.elements.length; i++) {
-    state.elements[i].anim.type = type; state.elements[i].anim.easing = easing;
-    state.elements[i].anim.duration = dur; state.elements[i].anim.distance = dist;
-    state.elements[i].anim.start = i * 0.15;
+  var seen = {}, order = [];
+  for (var fi = 0; fi < state.frames.length; fi++) {
+    for (var ei = 0; ei < state.frames[fi].elements.length; ei++) {
+      var nn = state.frames[fi].elements[ei].normalizedName;
+      if (!seen[nn]) { seen[nn] = true; order.push(nn); }
+    }
+  }
+  for (var k = 0; k < order.length; k++) {
+    state.animPresets[order[k]] = {
+      type: type, easing: easing, duration: dur, distance: dist, start: k * 0.15
+    };
   }
   refreshBadges(); renderFrame(state.currentTime);
-  log("Applied " + type + " to all");
+  log("Applied " + type + " to all (" + order.length + " distinct elements)");
 });
 $("btnClearAnim").addEventListener("click", function() {
-  if (state.selectedIndex >= 0) {
-    state.elements[state.selectedIndex].anim.type = "none"; $("animType").value = "none";
-    refreshBadges(); renderFrame(state.currentTime);
+  var f = currentFrame();
+  if (f && state.selectedElementIndex >= 0) {
+    var el = f.elements[state.selectedElementIndex];
+    if (el) {
+      delete state.animPresets[el.normalizedName];
+      $("animType").value = "none";
+      refreshBadges(); renderFrame(state.currentTime);
+    }
   }
 });
 $("btnExport").addEventListener("click", function() { exportVideo(); });
