@@ -277,9 +277,9 @@
     <div class="panel-right">
       <div class="section">
         <h3>Video Settings</h3>
-        <div class="field"><label>Duration (seconds)</label><input type="number" id="videoDuration" value="5" min="1" max="60" step="0.5" style="width:100%;"></div>
+        <div class="field"><label>Duration (seconds)</label><input type="number" id="videoDuration" value="6" min="1" max="60" step="0.5" style="width:100%;"></div>
         <div class="field"><label>Frame Rate</label>
-          <select id="videoFps" style="width:100%;"><option value="24">24 fps</option><option value="30" selected>30 fps</option><option value="60">60 fps</option></select>
+          <select id="videoFps" style="width:100%;"><option value="24" selected>24 fps</option><option value="30">30 fps</option><option value="60">60 fps</option></select>
         </div>
         <div class="field"><label>Resolution</label>
           <select id="videoResolution" style="width:100%;"><option value="1">1x (match frame)</option><option value="1080" selected>1080p (fit height)</option><option value="720">720p (fit height)</option></select>
@@ -307,7 +307,15 @@
       <div class="section">
         <h3>Export</h3>
         <div class="field"><label>Format</label><select id="exportFormat" style="width:100%;"><option value="webm">WebM (VP9)</option></select></div>
-        <div class="field"><label>Quality (Mbps)</label><input type="number" id="exportBitrate" value="8" min="1" max="50" step="1" style="width:100%;"></div>
+        <div class="field">
+          <label>Quality target</label>
+          <select id="qualityMode" style="width:100%;">
+            <option value="bitrate" selected>Bitrate (Mbps)</option>
+            <option value="size">Target file size (MB)</option>
+          </select>
+        </div>
+        <div class="field" id="fieldBitrate"><label>Bitrate (Mbps)</label><input type="number" id="exportBitrate" value="8" min="1" max="50" step="1" style="width:100%;"></div>
+        <div class="field" id="fieldTargetSize" style="display:none;"><label>Target size per variant (MB)</label><input type="number" id="exportTargetMB" value="10" min="1" max="500" step="1" style="width:100%;"></div>
         <button class="btn-success" id="btnExport" style="width:100%; padding:10px; font-size:13px; font-weight:600;" disabled>Export Video</button>
       </div>
     </div>
@@ -725,7 +733,7 @@ function applyAnimToElement(index) {
 // ── PLAYBACK ──
 function startPlayback() {
   if (state.playing) return;
-  var dur = parseFloat($("videoDuration").value) || 5;
+  var dur = parseFloat($("videoDuration").value) || 6;
   if (state.currentTime >= dur) state.currentTime = 0;
   state.playing = true;
   state.playStartWall = performance.now();
@@ -748,7 +756,7 @@ function playLoop() {
   if (!state.playing) return;
   var elapsed = (performance.now() - state.playStartWall) / 1000;
   state.currentTime = state.playStartTime + elapsed;
-  var dur = parseFloat($("videoDuration").value) || 5;
+  var dur = parseFloat($("videoDuration").value) || 6;
   if (state.currentTime >= dur) {
     if (state.looping) {
       state.currentTime = 0; state.playStartWall = performance.now(); state.playStartTime = 0;
@@ -762,7 +770,7 @@ function playLoop() {
   state.playRafId = requestAnimationFrame(playLoop);
 }
 function updateTimeUI() {
-  var dur = parseFloat($("videoDuration").value) || 5;
+  var dur = parseFloat($("videoDuration").value) || 6;
   $("timeDisplay").textContent = formatTime(state.currentTime) + " / " + formatTime(dur);
   $("timelineProgress").style.width = Math.min(100, (state.currentTime / dur) * 100) + "%";
 }
@@ -1016,13 +1024,22 @@ async function exportVideo() {
   $("exportOverlay").classList.remove("hidden"); $("btnExport").disabled = true;
   stopPlayback();
 
-  var dur = parseFloat($("videoDuration").value) || 5;
-  var fps = parseInt($("videoFps").value) || 30;
+  var dur = parseFloat($("videoDuration").value) || 6;
+  var fps = parseInt($("videoFps").value) || 24;
   var totalFrames = Math.ceil(dur * fps);
-  var bitrateVal = (parseFloat($("exportBitrate").value) || 8) * 1000000;
+  var mode = $("qualityMode").value;
+  var bitrateVal;
+  if (mode === "size") {
+    var targetMB = parseFloat($("exportTargetMB").value) || 10;
+    // Leave ~5% headroom so the container + audio overhead doesn't push each file over target.
+    bitrateVal = Math.max(500000, Math.round((targetMB * 1024 * 1024 * 8 * 0.95) / Math.max(dur, 0.1)));
+    log("Target size mode: " + targetMB + " MB/variant → " + (bitrateVal / 1000000).toFixed(2) + " Mbps over " + dur + "s");
+  } else {
+    bitrateVal = (parseFloat($("exportBitrate").value) || 8) * 1000000;
+  }
   var resOpt = $("videoResolution").value;
   var mimeType = pickMimeType();
-  log("Codec: " + mimeType + ", variants: " + state.frames.length);
+  log("Codec: " + mimeType + ", variants: " + state.frames.length + ", bitrate: " + (bitrateVal / 1000000).toFixed(2) + " Mbps");
 
   var originalIndex = state.selectedFrameIndex;
   var exportedCount = 0;
@@ -1093,15 +1110,20 @@ $("btnClearAnim").addEventListener("click", function() {
     }
   }
 });
+$("qualityMode").addEventListener("change", function() {
+  var size = this.value === "size";
+  $("fieldBitrate").style.display = size ? "none" : "";
+  $("fieldTargetSize").style.display = size ? "" : "none";
+});
 $("btnExport").addEventListener("click", function() { exportVideo(); });
 $("btnCancelExport").addEventListener("click", function() { state.exportCancel = true; });
 $("timelineTrack").addEventListener("click", function(e) {
   var rect = this.getBoundingClientRect();
-  var dur = parseFloat($("videoDuration").value) || 5;
+  var dur = parseFloat($("videoDuration").value) || 6;
   state.currentTime = Math.max(0, Math.min(dur, ((e.clientX - rect.left) / rect.width) * dur));
   updateTimeUI(); renderFrame(state.currentTime);
 });
-$("videoDuration").addEventListener("change", function() { state.duration = parseFloat(this.value) || 5; updateTimeUI(); });
+$("videoDuration").addEventListener("change", function() { state.duration = parseFloat(this.value) || 6; updateTimeUI(); });
 $("videoOpacity").addEventListener("input", function() { state.bgVideoOpacity = parseFloat(this.value); renderFrame(state.currentTime); });
 $("chkVideoLoop").addEventListener("change", function() { if (state.bgVideo) state.bgVideo.loop = this.checked; state.bgVideoLoop = this.checked; });
 $("audioVolume").addEventListener("input", function() { state.bgAudioVolume = parseFloat(this.value); if (state.bgAudio) state.bgAudio.volume = state.bgAudioVolume; });
