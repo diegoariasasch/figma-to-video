@@ -418,25 +418,27 @@ function fitCanvasToArea() {
 window.addEventListener("resize", function() { if (currentFrame()) fitCanvasToArea(); });
 
 // ── RENDER ──
+// Single source of truth for frame compositing. Preview and export both call this so
+// there is no way for the two render paths to diverge.
+function composeFrame(c, frame, w, h, t) {
+  c.save();
+  c.beginPath(); c.rect(0, 0, w, h); c.clip();
+  c.fillStyle = frame.bgColor || "#000";
+  c.fillRect(0, 0, w, h);
+  if (state.bgVideo && state.bgVideo.readyState >= 2) {
+    c.save(); c.globalAlpha = state.bgVideoOpacity;
+    drawCover(c, state.bgVideo, w, h); c.restore();
+  }
+  for (var i = 0; i < frame.elements.length; i++) {
+    if (frame.elements[i].visible) drawElement(c, frame.elements[i], t);
+  }
+  c.restore();
+}
+
 function renderFrame(t) {
   var f = currentFrame(); if (!f) return;
-  var w = canvas.width, h = canvas.height;
-  ctx.clearRect(0, 0, w, h);
-  ctx.save();
-  ctx.beginPath(); ctx.rect(0, 0, w, h); ctx.clip();
-
-  ctx.fillStyle = f.bgColor || "#000";
-  ctx.fillRect(0, 0, w, h);
-
-  if (state.bgVideo && state.bgVideo.readyState >= 2) {
-    ctx.save(); ctx.globalAlpha = state.bgVideoOpacity;
-    drawCover(ctx, state.bgVideo, w, h); ctx.restore();
-  }
-
-  for (var i = 0; i < f.elements.length; i++) {
-    if (f.elements[i].visible) drawElement(ctx, f.elements[i], t);
-  }
-  ctx.restore();
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  composeFrame(ctx, f, canvas.width, canvas.height, t);
 }
 
 function drawCover(c, src, cw, ch) {
@@ -855,6 +857,21 @@ function forEachKeyArtVideo(fn) {
     if (kv && kv.video) { try { fn(kv); } catch (e) {} }
   });
 }
+
+// Seek a video and wait for the decoder to land on the new frame. A 300 ms fallback
+// timeout keeps the export from hanging if a decode hiccup swallows the seeked event.
+function awaitVideoSeek(video, targetTime) {
+  return new Promise(function(resolve) {
+    if (!video || video.readyState < 2) return resolve();
+    if (Math.abs(video.currentTime - targetTime) < 0.005) return resolve();
+    var done = false;
+    var fin = function() { if (done) return; done = true; video.removeEventListener("seeked", onSeeked); resolve(); };
+    var onSeeked = function() { fin(); };
+    var to = setTimeout(fin, 300);
+    video.addEventListener("seeked", onSeeked);
+    try { video.currentTime = targetTime; } catch (e) { clearTimeout(to); fin(); }
+  });
+}
 function startPlayback() {
   if (state.playing) return;
   var dur = parseFloat($("videoDuration").value) || 6;
@@ -1074,7 +1091,11 @@ async function exportVariant(frame, variantIndex, variantTotal, mimeType, bitrat
   offCanvas.width = expW; offCanvas.height = expH;
   var offCtx = offCanvas.getContext("2d");
 
-  var stream = offCanvas.captureStream(0);
+  // Continuous sampling at the target fps. The browser pulls canvas bitmaps on its
+  // own clock, so our job is to paint each frame by the time it samples. This is
+  // more robust than captureStream(0) + explicit requestFrame, which has exhibited
+  // timestamp dedupe issues with MediaRecorder across browser versions.
+  var stream = offCanvas.captureStream(fps);
   var audioCtx = null;
   if (state.bgAudio) {
     try {
@@ -1106,36 +1127,31 @@ async function exportVariant(frame, variantIndex, variantTotal, mimeType, bitrat
     $("exportStatus").textContent = "Variant " + (variantIndex + 1) + "/" + variantTotal + " · Frame " + (f + 1) + "/" + totalFrames + " (" + pct + "%)";
     $("exportProgress").style.width = pct + "%";
 
+    // Await all video seeks in parallel so drawImage reads the correct decoded frame.
+    // Without this, bg/key-art videos appear frozen on whichever frame was decoded at
+    // the start of the export.
+    var seeks = [];
     if (state.bgVideo) {
-      state.bgVideo.currentTime = state.bgVideoLoop ? t % state.bgVideo.duration : Math.min(t, state.bgVideo.duration);
+      var bgd = state.bgVideo.duration || 0;
+      var bgTarget = bgd ? (state.bgVideoLoop ? t % bgd : Math.min(t, bgd)) : 0;
+      seeks.push(awaitVideoSeek(state.bgVideo, bgTarget));
     }
     kvs.forEach(function(kv) {
       if (!kv.video) return;
-      var vdur = kv.video.duration || 0;
-      kv.video.currentTime = (kv.loop !== false && vdur) ? (t % vdur) : Math.min(t, vdur);
+      var vd = kv.video.duration || 0;
+      var tgt = vd ? (kv.loop !== false ? t % vd : Math.min(t, vd)) : 0;
+      seeks.push(awaitVideoSeek(kv.video, tgt));
     });
+    if (seeks.length) await Promise.all(seeks);
 
     offCtx.save();
     offCtx.clearRect(0, 0, expW, expH);
-    offCtx.beginPath(); offCtx.rect(0, 0, expW, expH); offCtx.clip();
     offCtx.scale(sx, sy);
-    offCtx.fillStyle = frame.bgColor || "#000";
-    offCtx.fillRect(0, 0, frame.width, frame.height);
-    if (state.bgVideo && state.bgVideo.readyState >= 2) {
-      offCtx.save(); offCtx.globalAlpha = state.bgVideoOpacity;
-      drawCover(offCtx, state.bgVideo, frame.width, frame.height);
-      offCtx.restore();
-    }
-    for (var ei = 0; ei < frame.elements.length; ei++) {
-      if (frame.elements[ei].visible) drawElement(offCtx, frame.elements[ei], t);
-    }
+    composeFrame(offCtx, frame, frame.width, frame.height, t);
     offCtx.restore();
 
-    var vt = stream.getVideoTracks()[0];
-    if (vt && vt.requestFrame) vt.requestFrame();
-    // MediaRecorder timestamps frames by wall-clock time. Pace at 1000/fps so the
-    // recorded timeline matches the nominal duration; otherwise all frames arrive
-    // back-to-back and the resulting file spans only a few hundred ms.
+    // Pace to real time so the captureStream sampler produces a stream whose
+    // timeline matches the nominal duration (dur seconds @ fps).
     await new Promise(function(r) { setTimeout(r, 1000 / fps); });
   }
 

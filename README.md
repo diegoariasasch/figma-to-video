@@ -37,6 +37,8 @@ Set **Start**, **Duration**, **Distance**, and **Easing**. Click **"Apply to Ele
 
 Animations are **shared across the set** by element name — applying Fade In to `Headline` in one variant applies it to every variant's `Headline`. (Matching is case- and space-insensitive, same rules as Key Art.)
 
+**Per-line animation:** Text layers with explicit line breaks (you pressed Enter between lines in Figma) automatically split into `Line 1 … Line N` rows in the Elements list — each independently animatable, each keyed by `<name>__lineN` so presets are still shared across variants. Auto-wrapped text (a single run that wraps because the box is narrow) stays as one element since Figma's read API doesn't expose wrap positions. To animate wrapped copy line-by-line, add explicit newlines in Figma. The debug panel logs a hint ("press Enter between lines…") for every text layer it couldn't split.
+
 ### 4. Add Background Media (Set-Wide)
 - **Background Video**: plays behind all elements in every variant (cover-fit), adjustable opacity
 - **Background Audio**: muxed into every export with volume control

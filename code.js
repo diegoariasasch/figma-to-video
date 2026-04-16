@@ -78,9 +78,15 @@ async function exportFrameChildren(frame, frameIndex, frameTotal) {
       var lines = null;
       if (isText) {
         try { textContent = child.characters; } catch (e) {}
-        // Explicit line breaks only. Auto-wrapped lines aren't exposed by the Figma read API.
-        if (textContent && textContent.indexOf("\n") !== -1) {
-          lines = textContent.split("\n");
+        if (textContent) {
+          // Handle CRLF, CR, LF, Unicode line separator, Unicode paragraph separator.
+          var sep = /\r\n|\r|\n|\u2028|\u2029/;
+          if (sep.test(textContent)) {
+            lines = textContent.split(sep);
+            sendLog("  text '" + child.name + "' has " + lines.length + " lines (per-line animation available)");
+          } else {
+            sendLog("  text '" + child.name + "' is single-line in Figma's data. If it wraps visually, press Enter between lines to enable per-line animation.");
+          }
         }
       }
 
