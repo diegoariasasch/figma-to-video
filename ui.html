@@ -1016,35 +1016,43 @@ function forEachKeyArtVideo(fn) {
 
 // Seek a video and wait for the decoder to land on the new frame. A 300 ms fallback
 // timeout keeps the export from hanging if a decode hiccup swallows the seeked event.
-// Wait for a video's decoder to have at least one frame ready (readyState >= 2).
-// Resolves immediately if already ready. 1 s fallback so we never hang the export.
-function waitForVideoReady(video) {
+// Seek a video to `time`, wait for the decoder to actually land on that frame
+// (`seeked` event), then call play() and wait for the FIRST post-play frame via
+// requestVideoFrameCallback. This is the only reliable way to avoid the "static
+// PNG for one frame" flash — setting currentTime alone doesn't update the
+// decoded frame synchronously, and readyState can temporarily drop during the
+// seek. Used by both startPlayback (preview) and the export prep.
+function primeVideo(v, time) {
   return new Promise(function(resolve) {
-    if (!video) return resolve();
-    if (video.readyState >= 2) return resolve();
-    var done = false;
-    var fin = function() { if (done) return; done = true; video.removeEventListener("loadeddata", fin); video.removeEventListener("canplay", fin); resolve(); };
-    video.addEventListener("loadeddata", fin);
-    video.addEventListener("canplay", fin);
-    setTimeout(fin, 1000);
-  });
-}
-// Start a video playing and wait until it has painted a real frame, not just the
-// seek-to-0 poster. Uses requestVideoFrameCallback when available for sub-frame
-// precision; falls back to a 120 ms pause. Prevents the "first frame of the export
-// shows the static PNG" flash.
-function waitForFirstPlayingFrame(video) {
-  return new Promise(function(resolve) {
-    if (!video) return resolve();
-    var done = false;
-    var fin = function() { if (done) return; done = true; resolve(); };
-    try { video.play().catch(function(){}); } catch (e) {}
-    if (video.requestVideoFrameCallback) {
-      video.requestVideoFrameCallback(function() { fin(); });
-      setTimeout(fin, 500);
-    } else {
-      setTimeout(fin, 120);
+    if (!v) return resolve();
+    var safeTime = Math.max(0, time || 0);
+    var sought = false;
+    function doPlayWait() {
+      var done = false;
+      var fin = function() { if (done) return; done = true; resolve(); };
+      try { v.play().catch(function(){}); } catch (e) {}
+      if (v.requestVideoFrameCallback) {
+        v.requestVideoFrameCallback(function() { fin(); });
+        setTimeout(fin, 600);
+      } else {
+        var playing = function() { v.removeEventListener("playing", playing); setTimeout(fin, 40); };
+        v.addEventListener("playing", playing);
+        setTimeout(fin, 300);
+      }
     }
+    function onSeeked() { if (sought) return; sought = true; v.removeEventListener("seeked", onSeeked); doPlayWait(); }
+    v.addEventListener("seeked", onSeeked);
+    try {
+      if (Math.abs(v.currentTime - safeTime) < 0.001 && v.readyState >= 2) {
+        // Already at the target time with a decoded frame — no seeked event will fire.
+        v.removeEventListener("seeked", onSeeked);
+        doPlayWait();
+      } else {
+        v.currentTime = safeTime;
+      }
+    } catch (e) { v.removeEventListener("seeked", onSeeked); doPlayWait(); }
+    // Hard cap: if the decoder hangs, fall through after 1.5 s rather than freezing the export.
+    setTimeout(function() { if (!sought) { sought = true; v.removeEventListener("seeked", onSeeked); doPlayWait(); } }, 1500);
   });
 }
 function awaitVideoSeek(video, targetTime) {
@@ -1059,26 +1067,42 @@ function awaitVideoSeek(video, targetTime) {
     try { video.currentTime = targetTime; } catch (e) { clearTimeout(to); fin(); }
   });
 }
-function startPlayback() {
+async function startPlayback() {
   if (state.playing) return;
   var dur = parseFloat($("videoDuration").value) || 6;
   if (state.currentTime >= dur) state.currentTime = 0;
   state.playing = true;
-  state.playStartWall = performance.now();
-  state.playStartTime = state.currentTime;
   $("btnPlay").innerHTML = "&#10074;&#10074;";
-  if (state.bgVideo) { state.bgVideo.currentTime = state.currentTime; state.bgVideo.play().catch(function(){}); }
-  if (state.bgAudio) { state.bgAudio.currentTime = state.currentTime; state.bgAudio.play().catch(function(){}); }
+
+  // Collect every video that needs to be synced to state.currentTime, with the
+  // correct per-video start offset (loop-aware for key art / element videos).
+  var videoStartPairs = [];
+  if (state.bgVideo) videoStartPairs.push([state.bgVideo, state.currentTime]);
   forEachKeyArtVideo(function(kv) {
     var vdur = kv.video.duration || 0;
-    kv.video.currentTime = (kv.loop !== false && vdur) ? (state.currentTime % vdur) : Math.min(state.currentTime, vdur || state.currentTime);
-    kv.video.play().catch(function(){});
+    var startAt = (kv.loop !== false && vdur) ? (state.currentTime % vdur) : Math.min(state.currentTime, vdur || state.currentTime);
+    videoStartPairs.push([kv.video, startAt]);
   });
   forEachElementVideo(function(ev) {
     var vdur = ev.video.duration || 0;
-    ev.video.currentTime = (ev.loop !== false && vdur) ? (state.currentTime % vdur) : Math.min(state.currentTime, vdur || state.currentTime);
-    ev.video.play().catch(function(){});
+    var startAt = (ev.loop !== false && vdur) ? (state.currentTime % vdur) : Math.min(state.currentTime, vdur || state.currentTime);
+    videoStartPairs.push([ev.video, startAt]);
   });
+
+  // Wait for decoders to have a frame painted at the target time BEFORE starting
+  // the rAF loop. This adds ~50-200 ms of latency to Play but eliminates the
+  // flash where the first rendered frame still shows the static PNG because the
+  // video's decoder hadn't painted yet.
+  if (videoStartPairs.length) {
+    await Promise.all(videoStartPairs.map(function(p) { return primeVideo(p[0], p[1]); }));
+  }
+  if (!state.playing) return; // user hit Stop during the prime
+
+  if (state.bgAudio) { try { state.bgAudio.currentTime = state.currentTime; state.bgAudio.play().catch(function(){}); } catch (e) {} }
+  // primeVideo already kicked off .play() on each video, so the decoders are now
+  // running. Anchor the wall clock to now so the rAF loop advances from here.
+  state.playStartWall = performance.now();
+  state.playStartTime = state.currentTime;
   playLoop();
 }
 function stopPlayback() {
@@ -1324,13 +1348,12 @@ async function exportVariant(frame, variantIndex, variantTotal, mimeType, bitrat
   kvs.forEach(function(kv) { if (kv.video) allVids.push(kv.video); });
   Object.keys(state.elementVideos).forEach(function(k) { if (state.elementVideos[k].video) allVids.push(state.elementVideos[k].video); });
 
-  // Seek each to 0 (still-frame) and wait for the decoder to be ready, so the first
-  // rendered frame of the export already has video pixels instead of falling back
-  // to the static PNG for one tick.
-  allVids.forEach(function(v) { try { v.currentTime = 0; } catch (e) {} });
-  if (allVids.length) await Promise.all(allVids.map(waitForVideoReady));
-  // Kick off playback and wait until every video has painted its first frame post-play.
-  if (allVids.length) await Promise.all(allVids.map(waitForFirstPlayingFrame));
+  // Prime each video: seek to 0, wait for seeked, call play(), wait for the first
+  // post-play frame. primeVideo waits for the real decoder events (seeked + rVFC)
+  // so the decoded frame is guaranteed to be painted before the export loop draws.
+  // Without this, the first export frame falls through to the static PNG because
+  // drawImage(video) on a still-seeking decoder returns stale/empty pixels.
+  if (allVids.length) await Promise.all(allVids.map(function(v) { return primeVideo(v, 0); }));
 
   // Prime the canvas with frame 0 BEFORE starting the recorder so the sampler's
   // first capture isn't a blank/clear canvas. This is the second half of the
@@ -1372,10 +1395,6 @@ async function exportVariant(frame, variantIndex, variantTotal, mimeType, bitrat
     offCtx.scale(sx, sy);
     composeFrame(offCtx, frame, frame.width, frame.height, t);
     offCtx.restore();
-
-    // Yield one browser frame so the compositor can flush the canvas bitmap and
-    // the captureStream sampler has a chance to pull it before we overwrite next.
-    await new Promise(function(r) { requestAnimationFrame(function() { r(); }); });
   }
   // Hold the last frame for one slot so the sampler captures it.
   await new Promise(function(r) { setTimeout(r, frameMs); });
