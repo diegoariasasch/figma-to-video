@@ -529,7 +529,10 @@ function composeFrame(c, frame, w, h, t) {
   c.beginPath(); c.rect(0, 0, w, h); c.clip();
   c.fillStyle = frame.bgColor || "#000";
   c.fillRect(0, 0, w, h);
-  if (state.bgVideo && state.bgVideo.readyState >= 2) {
+  // Same logic as the element/key-art branches below: state.bgVideo is only
+  // assigned after the 'loadeddata' event, so we don't need to re-check
+  // readyState here — drawImage always has a cached decoded frame.
+  if (state.bgVideo) {
     c.save(); c.globalAlpha = state.bgVideoOpacity;
     drawCover(c, state.bgVideo, w, h); c.restore();
   }
@@ -609,11 +612,17 @@ function drawSingle(c, el, lineIndex, t) {
   }
 
   // Per-instance video (overrides static) — shared across variants by normalized name.
+  // NOTE: we deliberately do NOT gate on readyState >= 2 here. state.elementVideos /
+  // state.keyArtVideos are only populated inside each loader's 'loadeddata' handler
+  // (readyState was >= 2 at store time), so drawImage always has at least one
+  // decoded frame cached. If the user re-seeks the video (e.g. via the Stop /
+  // Rewind button), readyState can transiently drop during the seek — gating on
+  // it would flash the static PNG for one frame, then pop back to video content.
   var ev = state.elementVideos[el.normalizedName];
   var kv = el.keyArtSlot ? state.keyArtVideos[el.keyArtSlot] : null;
-  if (ev && ev.video && ev.video.readyState >= 2) {
+  if (ev && ev.video) {
     drawCoverInto(c, ev.video, dx, dy, dw, dh);
-  } else if (kv && kv.video && kv.video.readyState >= 2) {
+  } else if (kv && kv.video) {
     c.save();
     c.globalAlpha *= (kv.opacity != null ? kv.opacity : 1);
     drawCoverInto(c, kv.video, dx, dy, dw, dh);
@@ -1697,26 +1706,79 @@ var FFMPEG_LIB_URL = "https://unpkg.com/@ffmpeg/ffmpeg@" + FFMPEG_VERSION + "/di
 var FFMPEG_CORE_URL = "https://unpkg.com/@ffmpeg/core@" + FFMPEG_CORE_VERSION + "/dist/umd/ffmpeg-core.js";
 var FFMPEG_WASM_URL = "https://unpkg.com/@ffmpeg/core@" + FFMPEG_CORE_VERSION + "/dist/umd/ffmpeg-core.wasm";
 var _ffmpegPromise = null;
+// Fetch a URL with progress updates. Uses Response.body.getReader() to stream
+// chunks and report fraction complete via onProgress. Returns the resulting Blob.
+async function fetchWithProgress(url, onProgress) {
+  var r = await fetch(url);
+  if (!r.ok) throw new Error("HTTP " + r.status + " fetching " + url);
+  var total = Number(r.headers.get("Content-Length")) || 0;
+  if (!r.body || typeof r.body.getReader !== "function") {
+    if (onProgress) onProgress(null); // indeterminate
+    return r.blob();
+  }
+  var reader = r.body.getReader();
+  var chunks = [];
+  var received = 0;
+  while (true) {
+    var step = await reader.read();
+    if (step.done) break;
+    chunks.push(step.value);
+    received += step.value.length;
+    if (onProgress) onProgress(total ? received / total : null);
+  }
+  return new Blob(chunks);
+}
+// Load ffmpeg.wasm. We pre-fetch the core.js and .wasm on the main thread and
+// pass same-origin blob: URLs to ffmpeg.load(), because the worker spawned by
+// ffmpeg.wasm inside the Figma plugin iframe can't always cross-origin fetch
+// from unpkg.com directly — it hangs silently with no error event. Blob URLs
+// sidestep that because they inherit the document's origin.
 function loadFFmpeg(onProgress) {
   if (_ffmpegPromise) return _ffmpegPromise;
-  _ffmpegPromise = new Promise(function(resolve, reject) {
-    if (onProgress) onProgress("Loading converter (~30 MB, first time only)…");
-    var script = document.createElement("script");
-    script.src = FFMPEG_LIB_URL;
-    script.onload = function() {
-      var Ctor =
-        (window.FFmpegWASM && window.FFmpegWASM.FFmpeg) ||
-        (window.FFmpeg && window.FFmpeg.FFmpeg);
-      if (!Ctor) return reject(new Error("ffmpeg.js loaded but FFmpeg class not exposed on window"));
-      var ff = new Ctor();
-      ff.on("log", function(e) { log("[ffmpeg] " + e.message); });
-      if (onProgress) onProgress("Loading WASM core…");
-      ff.load({ coreURL: FFMPEG_CORE_URL, wasmURL: FFMPEG_WASM_URL }).then(function() {
-        resolve(ff);
-      }).catch(function(err) { _ffmpegPromise = null; reject(err); });
-    };
-    script.onerror = function() { _ffmpegPromise = null; reject(new Error("Failed to load ffmpeg.js from unpkg.com — network blocked or allowedDomains not set.")); };
-    document.head.appendChild(script);
+  _ffmpegPromise = (async function() {
+    // Step 1: load the UMD bundle of @ffmpeg/ffmpeg.
+    if (onProgress) onProgress("Downloading converter script…");
+    await new Promise(function(resolve, reject) {
+      var script = document.createElement("script");
+      script.src = FFMPEG_LIB_URL;
+      script.onload = function() { resolve(); };
+      script.onerror = function() { reject(new Error("Failed to load ffmpeg.js from unpkg.com — network blocked or allowedDomains not set.")); };
+      document.head.appendChild(script);
+    });
+    var Ctor =
+      (window.FFmpegWASM && window.FFmpegWASM.FFmpeg) ||
+      (window.FFmpeg && window.FFmpeg.FFmpeg);
+    if (!Ctor) throw new Error("ffmpeg.js loaded but FFmpeg class not exposed on window.");
+
+    // Step 2: pre-fetch the core JS + WASM with visible progress so the user sees
+    // the 30 MB WASM downloading instead of staring at a silent 'Loading WASM core…'.
+    var coreBlob, wasmBlob;
+    if (onProgress) onProgress("Downloading core JS…");
+    coreBlob = await fetchWithProgress(FFMPEG_CORE_URL, function(p) {
+      if (onProgress) onProgress("Downloading core JS… " + (p != null ? Math.round(p * 100) + "%" : ""));
+    });
+    if (onProgress) onProgress("Downloading WASM (30 MB)…");
+    wasmBlob = await fetchWithProgress(FFMPEG_WASM_URL, function(p) {
+      if (onProgress) onProgress("Downloading WASM… " + (p != null ? Math.round(p * 100) + "%" : "streaming"));
+    });
+    var coreURL = URL.createObjectURL(coreBlob);
+    var wasmURL = URL.createObjectURL(wasmBlob);
+
+    // Step 3: initialize. 60 s timeout — if the worker can't spin up in that
+    // long, something deeper is wrong (likely a sandbox policy issue) and we
+    // should fall back to the CLI toast rather than leaving the user hanging.
+    var ff = new Ctor();
+    ff.on("log", function(e) { log("[ffmpeg] " + e.message); });
+    if (onProgress) onProgress("Initializing converter…");
+    var loadPromise = ff.load({ coreURL: coreURL, wasmURL: wasmURL });
+    var timeoutPromise = new Promise(function(_, rej) {
+      setTimeout(function() { rej(new Error("ffmpeg.load() timed out after 60s — plugin sandbox may be blocking worker init.")); }, 60000);
+    });
+    await Promise.race([loadPromise, timeoutPromise]);
+    return ff;
+  })().catch(function(err) {
+    _ffmpegPromise = null; // let the next attempt retry
+    throw err;
   });
   return _ffmpegPromise;
 }
