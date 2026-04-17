@@ -1785,17 +1785,72 @@ function loadFFmpeg(onProgress) {
 // Convert a MOV/QuickTime file to WebM + VP9 + alpha via ffmpeg.wasm. Resolves to
 // a new File (with .webm extension) that can be passed into loadVideo /
 // loadKeyArtVideo / loadElementVideo. Rejects on any loader or conversion error.
+//
+// Encoding args are tuned for SMOOTH real-time playback inside a <video> element,
+// not for the smallest file. The previous command used libvpx-vp9 defaults, which
+// means one keyframe every 9999 frames (~333 s @ 30 fps). For a 6 s logo that's
+// one keyframe at the start followed by a 144-frame P-frame chain — any decoder
+// glitch mid-chain stalls playback for hundreds of ms before the decoder catches
+// up. Same story caused the "video pauses for a second during preview / export"
+// bug. Fixes applied here:
+//
+// -g 24 -keyint_min 24         every second gets a keyframe → stall recovers in ≤1 s
+// -r 24                        force constant 24 fps so source VFR doesn't confuse
+//                              the decoder or the wall-clock pacing loop
+// -vf "scale='min(1080,iw)':-2 downscale 4K ProRes sources to 1080 wide so per-frame
+//      :flags=lanczos"         decode fits comfortably in real-time budget
+// -cpu-used 4 -deadline good   faster encode AND the resulting bitstream uses simpler
+//                              prediction modes that decode quicker in Chromium
+// -row-mt 1 -tile-columns 2    enable parallel decode (tiles + row-multi-threading)
+//                              on the PLAYBACK side even though our encoder is
+//                              single-threaded in the WASM sandbox
+// -auto-alt-ref 0              mandatory for yuva420p alpha output
 async function convertMovToWebm(file, toast) {
   var ff = await loadFFmpeg(function(msg) { if (toast) toast.update("<strong>" + file.name + "</strong><br>" + msg); });
-  if (toast) toast.update("<strong>" + file.name + "</strong><br>Converting to WebM + VP9 alpha…");
+
+  // Wire a progress parser to ffmpeg's stderr — libvpx emits lines like
+  // "frame= 120 fps=24 q=0.0 size= ... time=00:00:05.00 bitrate= ..." during
+  // encode. Extracting time= gives us a live % against the source duration.
+  // Source duration is also emitted up front as "Duration: 00:00:06.00 ..."
+  var srcDur = 0;
+  var logHandler = function(e) {
+    var msg = e.message || "";
+    var dm = msg.match(/Duration:\s*(\d+):(\d+):(\d+\.\d+)/);
+    if (dm) srcDur = (+dm[1]) * 3600 + (+dm[2]) * 60 + parseFloat(dm[3]);
+    var tm = msg.match(/time=\s*(\d+):(\d+):(\d+\.\d+)/);
+    if (tm && toast && srcDur > 0) {
+      var t = (+tm[1]) * 3600 + (+tm[2]) * 60 + parseFloat(tm[3]);
+      var pct = Math.min(99, Math.round(t / srcDur * 100));
+      toast.update("<strong>" + file.name + "</strong><br>Converting to WebM + VP9 alpha… " + pct + "%");
+    }
+  };
+  ff.on("log", logHandler);
+
+  if (toast) toast.update("<strong>" + file.name + "</strong><br>Converting to WebM + VP9 alpha… 0%");
   var ext = (file.name.split('.').pop() || "mov").toLowerCase();
   var inputName = "input." + ext;
   var outputName = "output.webm";
   var buf = new Uint8Array(await file.arrayBuffer());
   await ff.writeFile(inputName, buf);
   try {
-    await ff.exec(["-i", inputName, "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "4M", "-auto-alt-ref", "0", outputName]);
+    await ff.exec([
+      "-i", inputName,
+      "-c:v", "libvpx-vp9",
+      "-pix_fmt", "yuva420p",
+      "-vf", "scale='min(1080,iw)':-2:flags=lanczos",
+      "-r", "24",
+      "-b:v", "4M",
+      "-deadline", "good",
+      "-cpu-used", "4",
+      "-row-mt", "1",
+      "-tile-columns", "2",
+      "-g", "24",
+      "-keyint_min", "24",
+      "-auto-alt-ref", "0",
+      outputName
+    ]);
   } finally {
+    try { ff.off && ff.off("log", logHandler); } catch (e) {}
     try { await ff.deleteFile(inputName); } catch (e) {}
   }
   var data = await ff.readFile(outputName);
