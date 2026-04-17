@@ -322,7 +322,7 @@
             <option value="size">Target file size (MB)</option>
           </select>
         </div>
-        <div class="field" id="fieldBitrate"><label>Bitrate (Mbps)</label><input type="number" id="exportBitrate" value="8" min="1" max="50" step="1" style="width:100%;"></div>
+        <div class="field" id="fieldBitrate"><label>Bitrate (Mbps)</label><input type="number" id="exportBitrate" value="25" min="1" max="100" step="1" style="width:100%;"></div>
         <div class="field" id="fieldTargetSize" style="display:none;"><label>Target size per variant (MB)</label><input type="number" id="exportTargetMB" value="10" min="1" max="500" step="1" style="width:100%;"></div>
         <button class="btn-success" id="btnExport" style="width:100%; padding:10px; font-size:13px; font-weight:600;" disabled>Export Video</button>
       </div>
@@ -1114,12 +1114,21 @@ async function exportVariant(frame, variantIndex, variantTotal, mimeType, bitrat
   var recorder = new MediaRecorder(stream, { mimeType: mimeType, videoBitsPerSecond: bitrateVal });
   recorder.ondataavailable = function(e) { if (e.data.size > 0) chunks.push(e.data); };
   var done = new Promise(function(r) { recorder.onstop = r; });
-  recorder.start();
-  if (state.bgVideo) { state.bgVideo.pause(); state.bgVideo.currentTime = 0; }
+
+  // Start every video playing forward at real-time. We DO NOT seek per-frame during
+  // export — seeking the decoder is async and takes 80-300 ms each, which would
+  // stretch wall time to several× the nominal duration. captureStream(fps) samples
+  // on wall-clock, so the recorded timeline must match wall time. The render loop
+  // below paces itself precisely at 1000/fps so one wall-second of recording
+  // corresponds to one nominal second of output.
+  if (state.bgVideo) { try { state.bgVideo.currentTime = 0; state.bgVideo.play().catch(function(){}); } catch (e) {} }
   var kvs = keyArtVideosArr();
-  kvs.forEach(function(kv) { if (kv.video) { try { kv.video.pause(); kv.video.currentTime = 0; } catch (e) {} } });
+  kvs.forEach(function(kv) { if (kv.video) { try { kv.video.currentTime = 0; kv.video.play().catch(function(){}); } catch (e) {} } });
+  recorder.start();
 
   var sx = expW / frame.width, sy = expH / frame.height;
+  var startWall = performance.now();
+  var frameMs = 1000 / fps;
   for (var f = 0; f < totalFrames; f++) {
     if (state.exportCancel) break;
     var t = f / fps;
@@ -1127,33 +1136,25 @@ async function exportVariant(frame, variantIndex, variantTotal, mimeType, bitrat
     $("exportStatus").textContent = "Variant " + (variantIndex + 1) + "/" + variantTotal + " · Frame " + (f + 1) + "/" + totalFrames + " (" + pct + "%)";
     $("exportProgress").style.width = pct + "%";
 
-    // Await all video seeks in parallel so drawImage reads the correct decoded frame.
-    // Without this, bg/key-art videos appear frozen on whichever frame was decoded at
-    // the start of the export.
-    var seeks = [];
-    if (state.bgVideo) {
-      var bgd = state.bgVideo.duration || 0;
-      var bgTarget = bgd ? (state.bgVideoLoop ? t % bgd : Math.min(t, bgd)) : 0;
-      seeks.push(awaitVideoSeek(state.bgVideo, bgTarget));
+    // Pace loop to real time. Wait until wall clock catches up to this frame's slot.
+    var targetWall = startWall + f * frameMs;
+    var now = performance.now();
+    if (now < targetWall) {
+      await new Promise(function(r) { setTimeout(r, targetWall - now); });
     }
-    kvs.forEach(function(kv) {
-      if (!kv.video) return;
-      var vd = kv.video.duration || 0;
-      var tgt = vd ? (kv.loop !== false ? t % vd : Math.min(t, vd)) : 0;
-      seeks.push(awaitVideoSeek(kv.video, tgt));
-    });
-    if (seeks.length) await Promise.all(seeks);
 
     offCtx.save();
     offCtx.clearRect(0, 0, expW, expH);
     offCtx.scale(sx, sy);
     composeFrame(offCtx, frame, frame.width, frame.height, t);
     offCtx.restore();
-
-    // Pace to real time so the captureStream sampler produces a stream whose
-    // timeline matches the nominal duration (dur seconds @ fps).
-    await new Promise(function(r) { setTimeout(r, 1000 / fps); });
   }
+  // Hold the last frame for one slot so the sampler captures it.
+  await new Promise(function(r) { setTimeout(r, frameMs); });
+
+  // Pause video sources so they don't keep playing after export.
+  if (state.bgVideo) try { state.bgVideo.pause(); } catch (e) {}
+  kvs.forEach(function(kv) { if (kv.video) try { kv.video.pause(); } catch (e) {} });
 
   recorder.stop(); await done;
   if (audioCtx) try { audioCtx.close(); } catch (e) {}
@@ -1189,7 +1190,7 @@ async function exportVideo() {
     bitrateVal = Math.max(500000, Math.round((targetMB * 1024 * 1024 * 8 * 0.95) / Math.max(dur, 0.1)));
     log("Target size mode: " + targetMB + " MB/variant → " + (bitrateVal / 1000000).toFixed(2) + " Mbps over " + dur + "s");
   } else {
-    bitrateVal = (parseFloat($("exportBitrate").value) || 8) * 1000000;
+    bitrateVal = (parseFloat($("exportBitrate").value) || 25) * 1000000;
   }
   var resOpt = $("videoResolution").value;
   var mimeType = pickMimeType();
