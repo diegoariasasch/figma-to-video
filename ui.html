@@ -565,6 +565,22 @@ function drawCoverInto(c, src, dx, dy, dw, dh) {
   c.restore();
 }
 
+// Draw a video state entry (Key Art slot, Element video) cover-fit into the
+// destination rect. Prefers the pre-decoded ImageBitmap[] when available —
+// bitmap blits never stall the way <video> decoders do — and falls back to
+// the <video> element when frames is null (over-budget elements + non-MOV
+// inputs that bypass the converter).
+function drawEntryCover(c, entry, dx, dy, dw, dh, t) {
+  if (entry.frames && entry.frames.length) {
+    var fps = entry.fps || 24;
+    var idx = Math.floor(t * fps) % entry.frames.length;
+    if (idx < 0) idx = 0;
+    drawCoverInto(c, entry.frames[idx], dx, dy, dw, dh);
+  } else if (entry.video) {
+    drawCoverInto(c, entry.video, dx, dy, dw, dh);
+  }
+}
+
 function drawElement(c, el, t) {
   // Multi-line text: one draw per line, each with its own animation preset and a horizontal band slice of the PNG.
   if (el.lineCount > 1 && (!el.keyArtSlot)) {
@@ -612,20 +628,21 @@ function drawSingle(c, el, lineIndex, t) {
   }
 
   // Per-instance video (overrides static) — shared across variants by normalized name.
-  // NOTE: we deliberately do NOT gate on readyState >= 2 here. state.elementVideos /
-  // state.keyArtVideos are only populated inside each loader's 'loadeddata' handler
-  // (readyState was >= 2 at store time), so drawImage always has at least one
-  // decoded frame cached. If the user re-seeks the video (e.g. via the Stop /
-  // Rewind button), readyState can transiently drop during the seek — gating on
-  // it would flash the static PNG for one frame, then pop back to video content.
+  // Prefer pre-decoded ImageBitmap frames (entry.frames) over the <video> element
+  // when available — bitmap blits are pure GPU and have no decoder in the hot
+  // path, so they can't stutter mid-playback. Falls back to <video> for
+  // entries that exceeded the 200 MB pre-decode budget (see convertMovToWebm).
+  // We also do NOT gate on readyState here: state.elementVideos /
+  // state.keyArtVideos are only populated inside each loader's 'loadeddata'
+  // handler, so drawImage always has at least one decoded frame cached.
   var ev = state.elementVideos[el.normalizedName];
   var kv = el.keyArtSlot ? state.keyArtVideos[el.keyArtSlot] : null;
-  if (ev && ev.video) {
-    drawCoverInto(c, ev.video, dx, dy, dw, dh);
-  } else if (kv && kv.video) {
+  if (ev) {
+    drawEntryCover(c, ev, dx, dy, dw, dh, t);
+  } else if (kv) {
     c.save();
     c.globalAlpha *= (kv.opacity != null ? kv.opacity : 1);
-    drawCoverInto(c, kv.video, dx, dy, dw, dh);
+    drawEntryCover(c, kv, dx, dy, dw, dh, t);
     c.restore();
   } else {
     c.drawImage(el.img, dx, dy, dw, dh);
@@ -1085,14 +1102,19 @@ async function startPlayback() {
 
   // Collect every video that needs to be synced to state.currentTime, with the
   // correct per-video start offset (loop-aware for key art / element videos).
+  // SKIP entries with pre-decoded frames — they don't read from the <video>
+  // element on the draw path, so we don't need to seek/play it. Avoids 50-200 ms
+  // of useless prime latency per frame-backed video on Play.
   var videoStartPairs = [];
   if (state.bgVideo) videoStartPairs.push([state.bgVideo, state.currentTime]);
   forEachKeyArtVideo(function(kv) {
+    if (kv.frames && kv.frames.length) return;
     var vdur = kv.video.duration || 0;
     var startAt = (kv.loop !== false && vdur) ? (state.currentTime % vdur) : Math.min(state.currentTime, vdur || state.currentTime);
     videoStartPairs.push([kv.video, startAt]);
   });
   forEachElementVideo(function(ev) {
+    if (ev.frames && ev.frames.length) return;
     var vdur = ev.video.duration || 0;
     var startAt = (ev.loop !== false && vdur) ? (state.currentTime % vdur) : Math.min(state.currentTime, vdur || state.currentTime);
     videoStartPairs.push([ev.video, startAt]);
@@ -1238,6 +1260,7 @@ function rebuildKeyArtSlotsPanel() {
       renderFrame(state.currentTime);
     });
     removeBtn.addEventListener("click", function() {
+      releaseEntryFrames(state.keyArtVideos[slot]);
       var kv = state.keyArtVideos[slot];
       if (kv && kv.video) { try { kv.video.pause(); } catch (e) {} }
       delete state.keyArtVideos[slot];
@@ -1247,9 +1270,46 @@ function rebuildKeyArtSlotsPanel() {
   });
 }
 
+// Find the largest renderW × renderH across all elements that match a predicate.
+// Used to pick a single bitmap size that's big enough for every variant where
+// this video might appear (e.g., a Key Art slot wired to a 500×500 element in
+// variant A and a 700×700 element in variant B → pick 700×700; downscaling
+// during draw is free, upscaling would lose quality). Falls back to 1080×1080
+// if no matching element is found at drop time (e.g., dropped before any
+// variants are loaded — unusual but possible).
+function largestRectForElements(predicate) {
+  var maxW = 0, maxH = 0;
+  for (var fi = 0; fi < state.frames.length; fi++) {
+    var els = state.frames[fi].elements || [];
+    for (var ei = 0; ei < els.length; ei++) {
+      var el = els[ei];
+      if (predicate(el)) {
+        if (el.renderW > maxW) maxW = el.renderW;
+        if (el.renderH > maxH) maxH = el.renderH;
+      }
+    }
+  }
+  if (!maxW || !maxH) { maxW = 1080; maxH = 1080; }
+  return { w: maxW, h: maxH };
+}
+// Release GPU memory for an entry's pre-decoded frames. Safe to call on
+// undefined / null / no-frames entries.
+function releaseEntryFrames(entry) {
+  if (!entry || !entry.frames) return;
+  entry.frames.forEach(function(b) { try { b.close(); } catch (e) {} });
+  entry.frames = null;
+}
+
 async function loadKeyArtVideo(slot, file) {
-  file = await coerceToPlayable(file); if (!file) return;
-  var url = URL.createObjectURL(file);
+  // Pick a bitmap size that's big enough for every element wired to this slot.
+  var rect = largestRectForElements(function(el) { return el.keyArtSlot === slot; });
+  var fps = parseInt($("videoFps").value) || 24;
+  var result = await coerceToPlayable(file, { destW: rect.w, destH: rect.h, fps: fps });
+  if (!result) return;
+  // Replace any previous entry's bitmaps before overwriting state.
+  releaseEntryFrames(state.keyArtVideos[slot]);
+  var actualFile = result.file;
+  var url = URL.createObjectURL(actualFile);
   var v = document.createElement("video");
   var prev = state.keyArtVideos[slot] || {};
   v.src = url; v.muted = true;
@@ -1257,26 +1317,33 @@ async function loadKeyArtVideo(slot, file) {
   v.playsInline = true; v.preload = "auto";
   v.addEventListener("loadeddata", function() {
     state.keyArtVideos[slot] = {
-      file: file, video: v,
+      file: actualFile, video: v,
       loop: prev.loop !== false,
-      opacity: prev.opacity != null ? prev.opacity : 1
+      opacity: prev.opacity != null ? prev.opacity : 1,
+      frames: result.frames,
+      fps: result.fps
     };
-    log("Key Art '" + slot + "' video loaded: " + file.name + " (" + v.videoWidth + "x" + v.videoHeight + ")");
+    log("Key Art '" + slot + "' video loaded: " + actualFile.name + " (" + v.videoWidth + "x" + v.videoHeight + ")" +
+        (result.frames ? " [bitmap-backed: " + result.frames.length + " @ " + rect.w + "×" + rect.h + "]" : " [<video> playback]"));
     rebuildKeyArtSlotsPanel();
     renderFrame(state.currentTime);
   });
   v.load();
 }
 async function loadVideo(file) {
-  file = await coerceToPlayable(file); if (!file) return;
-  var url = URL.createObjectURL(file);
+  // BG video is full-canvas — would always exceed the 200 MB bitmap budget.
+  // Skip frame pre-decode and use <video> playback.
+  var result = await coerceToPlayable(file);
+  if (!result) return;
+  var actualFile = result.file;
+  var url = URL.createObjectURL(actualFile);
   var v = document.createElement("video");
   v.src = url; v.muted = true; v.loop = $("chkVideoLoop").checked; v.playsInline = true; v.preload = "auto";
   v.addEventListener("loadeddata", function() {
     state.bgVideo = v;
-    $("dropVideo").classList.add("has-file"); $("dropVideo").textContent = file.name;
+    $("dropVideo").classList.add("has-file"); $("dropVideo").textContent = actualFile.name;
     $("btnRemoveVideo").style.display = "block"; renderFrame(state.currentTime);
-    log("Video loaded: " + file.name);
+    log("Video loaded: " + actualFile.name);
   });
   v.load();
 }
@@ -1354,8 +1421,12 @@ async function exportVariant(frame, variantIndex, variantTotal, mimeType, bitrat
   var kvs = keyArtVideosArr();
   var allVids = [];
   if (state.bgVideo) allVids.push(state.bgVideo);
-  kvs.forEach(function(kv) { if (kv.video) allVids.push(kv.video); });
-  Object.keys(state.elementVideos).forEach(function(k) { if (state.elementVideos[k].video) allVids.push(state.elementVideos[k].video); });
+  // Skip frame-backed entries — their <video> isn't read on the draw path.
+  kvs.forEach(function(kv) { if (kv.video && !(kv.frames && kv.frames.length)) allVids.push(kv.video); });
+  Object.keys(state.elementVideos).forEach(function(k) {
+    var ev = state.elementVideos[k];
+    if (ev.video && !(ev.frames && ev.frames.length)) allVids.push(ev.video);
+  });
 
   // Prime each video: seek to 0, wait for seeked, call play(), wait for the first
   // post-play frame. primeVideo waits for the real decoder events (seeked + rVFC)
@@ -1783,29 +1854,24 @@ function loadFFmpeg(onProgress) {
   return _ffmpegPromise;
 }
 // Convert a MOV/QuickTime file to WebM + VP9 + alpha via ffmpeg.wasm. Resolves to
-// a new File (with .webm extension) that can be passed into loadVideo /
-// loadKeyArtVideo / loadElementVideo. Rejects on any loader or conversion error.
+// { file, frames, fps } where:
+//   - file: a new File (.webm) playable in <video>
+//   - frames: ImageBitmap[] | null — pre-decoded frames sized to opts.destW/H if
+//     provided AND the total bitmap memory stays under 200 MB. Drawing from a
+//     cached ImageBitmap array bypasses the <video> decoder entirely on the
+//     playback hot path, which is the only way to reliably eliminate the
+//     residual mid-playback stutter inside the Figma plugin sandbox.
+//   - fps: the framerate the bitmaps were sampled at (so the draw code can pick
+//     the right index from playback time t).
 //
-// Encoding args are tuned for SMOOTH real-time playback inside a <video> element,
-// not for the smallest file. The previous command used libvpx-vp9 defaults, which
-// means one keyframe every 9999 frames (~333 s @ 30 fps). For a 6 s logo that's
-// one keyframe at the start followed by a 144-frame P-frame chain — any decoder
-// glitch mid-chain stalls playback for hundreds of ms before the decoder catches
-// up. Same story caused the "video pauses for a second during preview / export"
-// bug. Fixes applied here:
+// opts: { destW, destH, fps } — destW/H come from el.renderW/renderH for the
+// element (or the largest renderW/H across same-named elements for slot drops).
+// If opts is omitted, no frames are pre-decoded and only the WebM file is
+// returned (used for BG video which is full-canvas and would blow the budget).
 //
-// -g 24 -keyint_min 24         every second gets a keyframe → stall recovers in ≤1 s
-// -r 24                        force constant 24 fps so source VFR doesn't confuse
-//                              the decoder or the wall-clock pacing loop
-// -vf "scale='min(1080,iw)':-2 downscale 4K ProRes sources to 1080 wide so per-frame
-//      :flags=lanczos"         decode fits comfortably in real-time budget
-// -cpu-used 4 -deadline good   faster encode AND the resulting bitstream uses simpler
-//                              prediction modes that decode quicker in Chromium
-// -row-mt 1 -tile-columns 2    enable parallel decode (tiles + row-multi-threading)
-//                              on the PLAYBACK side even though our encoder is
-//                              single-threaded in the WASM sandbox
-// -auto-alt-ref 0              mandatory for yuva420p alpha output
-async function convertMovToWebm(file, toast) {
+// Encoding args are tuned for SMOOTH real-time playback inside a <video> element
+// (relevant whenever frames is null and we fall back to <video> playback).
+async function convertMovToWebm(file, toast, opts) {
   var ff = await loadFFmpeg(function(msg) { if (toast) toast.update("<strong>" + file.name + "</strong><br>" + msg); });
 
   // Wire a progress parser to ffmpeg's stderr — libvpx emits lines like
@@ -1813,6 +1879,7 @@ async function convertMovToWebm(file, toast) {
   // encode. Extracting time= gives us a live % against the source duration.
   // Source duration is also emitted up front as "Duration: 00:00:06.00 ..."
   var srcDur = 0;
+  var stage = "encode"; // "encode" | "frames"
   var logHandler = function(e) {
     var msg = e.message || "";
     var dm = msg.match(/Duration:\s*(\d+):(\d+):(\d+\.\d+)/);
@@ -1821,7 +1888,8 @@ async function convertMovToWebm(file, toast) {
     if (tm && toast && srcDur > 0) {
       var t = (+tm[1]) * 3600 + (+tm[2]) * 60 + parseFloat(tm[3]);
       var pct = Math.min(99, Math.round(t / srcDur * 100));
-      toast.update("<strong>" + file.name + "</strong><br>Converting to WebM + VP9 alpha… " + pct + "%");
+      var label = stage === "encode" ? "Converting to WebM + VP9 alpha…" : "Extracting frames…";
+      toast.update("<strong>" + file.name + "</strong><br>" + label + " " + pct + "%");
     }
   };
   ff.on("log", logHandler);
@@ -1832,46 +1900,103 @@ async function convertMovToWebm(file, toast) {
   var outputName = "output.webm";
   var buf = new Uint8Array(await file.arrayBuffer());
   await ff.writeFile(inputName, buf);
+
+  var frames = null;
+  var fps = (opts && opts.fps) || 24;
   try {
+    // Pass 1 — produce the playable WebM (used as <video> fallback if frame
+    // pre-decode is skipped or if a downstream consumer doesn't request frames).
     await ff.exec([
       "-i", inputName,
       "-c:v", "libvpx-vp9",
       "-pix_fmt", "yuva420p",
       "-vf", "scale='min(1080,iw)':-2:flags=lanczos",
-      "-r", "24",
+      "-r", String(fps),
       "-b:v", "4M",
       "-deadline", "good",
       "-cpu-used", "4",
       "-row-mt", "1",
       "-tile-columns", "2",
-      "-g", "24",
-      "-keyint_min", "24",
+      "-g", String(fps),
+      "-keyint_min", String(fps),
       "-auto-alt-ref", "0",
       outputName
     ]);
+
+    // Pass 2 — extract per-frame PNGs sized to the destination rect. We re-read
+    // the WebM we just produced so the frame timing matches the playable file
+    // exactly. yuva420p → rgba PNG preserves alpha. The 200 MB budget gate keeps
+    // this off for full-canvas videos (which would balloon to >1 GB).
+    if (opts && opts.destW && opts.destH) {
+      var w = Math.max(1, Math.round(opts.destW));
+      var h = Math.max(1, Math.round(opts.destH));
+      // Estimate frame count from source duration × fps. Cap at a sane upper
+      // bound so an unknown-duration source can't pre-allocate-burn memory.
+      var estCount = srcDur > 0 ? Math.ceil(srcDur * fps) : (fps * 60);
+      var estBytes = w * h * 4 * estCount;
+      var BUDGET = 200 * 1024 * 1024;
+      if (estBytes > BUDGET) {
+        log("Skipped frame pre-decode for \"" + file.name + "\": estimated " +
+            (estBytes / 1048576).toFixed(0) + " MB > 200 MB budget. Using <video> playback.", "warn");
+      } else {
+        stage = "frames";
+        if (toast) toast.update("<strong>" + file.name + "</strong><br>Extracting " + w + "×" + h + " frames…");
+        await ff.exec([
+          "-i", outputName,
+          "-vf", "fps=" + fps + ",scale=" + w + ":" + h + ":flags=lanczos",
+          "-pix_fmt", "rgba",
+          "frame_%04d.png"
+        ]);
+        if (toast) toast.update("<strong>" + file.name + "</strong><br>Decoding bitmaps…");
+        frames = [];
+        // Probe sequentially — ffmpeg numbers frames starting at 1 and the loop
+        // breaks the first time a file doesn't exist (caught readFile error).
+        for (var i = 1; i < 100000; i++) {
+          var pngName = "frame_" + String(i).padStart(4, "0") + ".png";
+          var pngData;
+          try { pngData = await ff.readFile(pngName); } catch (e) { break; }
+          var pngBlob = new Blob([pngData.buffer], { type: "image/png" });
+          var bitmap = await createImageBitmap(pngBlob);
+          frames.push(bitmap);
+          try { await ff.deleteFile(pngName); } catch (e) {}
+          // Yield every 8 frames so the UI doesn't lock during decode of a
+          // long source. Also lets the toast update repaint.
+          if (i % 8 === 0) await new Promise(function(r) { setTimeout(r, 0); });
+        }
+        log("Pre-decoded " + frames.length + " frames at " + w + "×" + h + " for " + file.name);
+      }
+    }
   } finally {
     try { ff.off && ff.off("log", logHandler); } catch (e) {}
     try { await ff.deleteFile(inputName); } catch (e) {}
   }
+
   var data = await ff.readFile(outputName);
   try { await ff.deleteFile(outputName); } catch (e) {}
   var blob = new Blob([data.buffer], { type: "video/webm" });
   var outName = file.name.replace(/\.(mov|qt)$/i, "") + ".webm";
-  return new File([blob], outName, { type: "video/webm" });
+  var webmFile = new File([blob], outName, { type: "video/webm" });
+  return { file: webmFile, frames: frames, fps: fps };
 }
 // Ensure a dropped file is playable by the browser. If it's a MOV/QT, convert
-// it through ffmpeg.wasm first. On any conversion failure, show the CLI toast
-// as a fallback and return null so callers short-circuit the load.
-async function coerceToPlayable(file) {
-  if (!looksLikeMov(file)) return file;
+// through ffmpeg.wasm AND optionally pre-decode frames sized to the destination
+// rect (opts.destW/H). Always returns { file, frames, fps } shape so callers
+// have a uniform thing to store on their state entry. For non-MOV inputs frames
+// stays null and the loader uses <video> playback. On conversion failure shows
+// the CLI toast and returns null so callers short-circuit the load.
+async function coerceToPlayable(file, opts) {
+  if (!looksLikeMov(file)) return { file: file, frames: null, fps: (opts && opts.fps) || 24 };
   var toast = createToast({ id: "mov-convert" });
   toast.update("<strong>" + file.name + "</strong><br>Preparing converter…");
   try {
-    var converted = await convertMovToWebm(file, toast);
-    toast.update("<strong>Converted ✓</strong><br>" + converted.name + " (" + (converted.size / 1048576).toFixed(1) + " MB)");
+    var result = await convertMovToWebm(file, toast, opts);
+    var summary = result.file.name + " (" + (result.file.size / 1048576).toFixed(1) + " MB)" +
+      (result.frames ? " · " + result.frames.length + " frames cached" : "");
+    toast.update("<strong>Converted ✓</strong><br>" + summary);
     setTimeout(function() { toast.close(); }, 3000);
-    log("Converted " + file.name + " → " + converted.name + " via ffmpeg.wasm");
-    return converted;
+    log("Converted " + file.name + " → " + result.file.name + " via ffmpeg.wasm" +
+        (result.frames ? " (frames=" + result.frames.length + ")" : ""));
+    return result;
   } catch (e) {
     log("ffmpeg.wasm conversion failed: " + e.message, "err");
     toast.close();
@@ -1884,16 +2009,30 @@ async function coerceToPlayable(file) {
 // Keyed by normalized layer name so one drop applies to every same-named layer
 // across every variant — same convention as Key Art slots.
 async function loadElementVideo(nameKey, file) {
-  file = await coerceToPlayable(file); if (!file) return;
-  var url = URL.createObjectURL(file);
+  // Pick a bitmap size that's big enough for every same-named element across
+  // every variant. Drawing into a smaller box than the bitmap downscales for
+  // free; upscaling would lose quality.
+  var rect = largestRectForElements(function(el) { return el.normalizedName === nameKey; });
+  var fps = parseInt($("videoFps").value) || 24;
+  var result = await coerceToPlayable(file, { destW: rect.w, destH: rect.h, fps: fps });
+  if (!result) return;
+  releaseEntryFrames(state.elementVideos[nameKey]);
+  var actualFile = result.file;
+  var url = URL.createObjectURL(actualFile);
   var v = document.createElement("video");
   var prev = state.elementVideos[nameKey] || {};
   v.src = url; v.muted = true;
   v.loop = prev.loop !== false;
   v.playsInline = true; v.preload = "auto";
   v.addEventListener("loadeddata", function() {
-    state.elementVideos[nameKey] = { file: file, video: v, loop: prev.loop !== false };
-    log("Element video loaded for '" + nameKey + "': " + file.name);
+    state.elementVideos[nameKey] = {
+      file: actualFile, video: v,
+      loop: prev.loop !== false,
+      frames: result.frames,
+      fps: result.fps
+    };
+    log("Element video loaded for '" + nameKey + "': " + actualFile.name +
+        (result.frames ? " [bitmap-backed: " + result.frames.length + " @ " + rect.w + "×" + rect.h + "]" : " [<video> playback]"));
     var f = currentFrame();
     if (f && state.selectedElementIndex >= 0) {
       var el = f.elements[state.selectedElementIndex];
@@ -1906,6 +2045,7 @@ async function loadElementVideo(nameKey, file) {
 }
 function removeElementVideo(nameKey) {
   var ev = state.elementVideos[nameKey];
+  releaseEntryFrames(ev);
   if (ev && ev.video) { try { ev.video.pause(); } catch (e) {} }
   delete state.elementVideos[nameKey];
   var f = currentFrame();
