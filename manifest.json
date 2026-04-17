@@ -8,8 +8,9 @@
   "networkAccess": {
     "allowedDomains": [
       "https://gist.githubusercontent.com",
-      "https://raw.githubusercontent.com"
+      "https://raw.githubusercontent.com",
+      "https://unpkg.com"
     ],
-    "reasoning": "Kill-switch check: plugin fetches a small JSON status file the maintainer hosts on GitHub (gist or repo). If the file sets disabled=true, the plugin refuses to run. Fetch fails open on offline."
+    "reasoning": "Kill-switch fetches a small JSON status file the maintainer hosts on GitHub (disabled flag). unpkg.com serves the ffmpeg.wasm converter loaded on demand when a MOV / ProRes file is dropped, so the plugin can transcode to WebM + VP9 alpha in-browser instead of requiring a CLI step."
   }
 }

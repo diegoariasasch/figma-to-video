@@ -1214,8 +1214,8 @@ function rebuildKeyArtSlotsPanel() {
   });
 }
 
-function loadKeyArtVideo(slot, file) {
-  if (looksLikeMov(file)) { showMovToast(file); return; }
+async function loadKeyArtVideo(slot, file) {
+  file = await coerceToPlayable(file); if (!file) return;
   var url = URL.createObjectURL(file);
   var v = document.createElement("video");
   var prev = state.keyArtVideos[slot] || {};
@@ -1234,8 +1234,8 @@ function loadKeyArtVideo(slot, file) {
   });
   v.load();
 }
-function loadVideo(file) {
-  if (looksLikeMov(file)) { showMovToast(file); return; }
+async function loadVideo(file) {
+  file = await coerceToPlayable(file); if (!file) return;
   var url = URL.createObjectURL(file);
   var v = document.createElement("video");
   v.src = url; v.muted = true; v.loop = $("chkVideoLoop").checked; v.playsInline = true; v.preload = "auto";
@@ -1637,25 +1637,118 @@ function looksLikeMov(file) {
   if ((file.type || "").toLowerCase().indexOf("quicktime") !== -1) return true;
   return false;
 }
-function showMovToast(file) {
-  var existing = document.querySelector(".toast[data-mov]"); if (existing) existing.remove();
+// Progressive toast with an updatable status line and an optional ffmpeg CLI fallback.
+function createToast(opts) {
+  var existing = document.querySelector(".toast[data-id='" + opts.id + "']"); if (existing) existing.remove();
   var t = document.createElement("div");
-  t.className = "toast err"; t.setAttribute("data-mov", "1");
+  t.className = "toast" + (opts.error ? " err" : "");
+  t.setAttribute("data-id", opts.id);
   t.innerHTML = '<span class="toast-close" title="Dismiss">&times;</span>' +
-    '<strong>Can\'t load ' + (file.name || "MOV file") + '</strong><br>' +
-    "Chromium can't decode ProRes / 4444 MOV. Convert to WebM with VP9 + alpha and re-drop:" +
-    '<code>ffmpeg -i "' + (file.name || "input.mov") + '" -c:v libvpx-vp9 -pix_fmt yuva420p -b:v 4M -auto-alt-ref 0 "' +
-    (file.name ? file.name.replace(/\.(mov|qt)$/i, "") : "output") + '.webm"</code>';
+    '<div class="toast-body"></div>';
   document.querySelector(".canvas-area").appendChild(t);
   t.querySelector(".toast-close").addEventListener("click", function() { t.remove(); });
-  setTimeout(function() { if (t.parentNode) t.remove(); }, 20000);
+  var body = t.querySelector(".toast-body");
+  return {
+    el: t,
+    update: function(html) { body.innerHTML = html; },
+    close: function() { if (t.parentNode) t.remove(); },
+    error: function(html) { t.classList.add("err"); body.innerHTML = html; setTimeout(function() { t.remove(); }, 20000); }
+  };
+}
+// Show the CLI fallback toast when in-plugin conversion isn't possible.
+function showMovCliToast(file) {
+  var toast = createToast({ id: "mov-cli", error: true });
+  toast.update(
+    '<strong>Can\'t load ' + (file.name || "MOV file") + '</strong><br>' +
+    "The in-plugin converter isn't available. Run this in your terminal and drop the resulting .webm:" +
+    '<code>ffmpeg -i "' + (file.name || "input.mov") + '" -c:v libvpx-vp9 -pix_fmt yuva420p -b:v 4M -auto-alt-ref 0 "' +
+    (file.name ? file.name.replace(/\.(mov|qt)$/i, "") : "output") + '.webm"</code>'
+  );
+}
+// Back-compat alias — kept in case anything still calls it.
+function showMovToast(file) { showMovCliToast(file); }
+
+// ── FFMPEG.WASM CONVERTER ──
+// Lazily load ffmpeg.wasm from the allowlisted unpkg.com CDN on first MOV drop.
+// Single-threaded build — no SharedArrayBuffer required, so it runs in the plain
+// plugin iframe without cross-origin isolation headers.
+var FFMPEG_VERSION = "0.12.10";
+var FFMPEG_CORE_VERSION = "0.12.6";
+var FFMPEG_LIB_URL = "https://unpkg.com/@ffmpeg/ffmpeg@" + FFMPEG_VERSION + "/dist/umd/ffmpeg.js";
+var FFMPEG_CORE_URL = "https://unpkg.com/@ffmpeg/core@" + FFMPEG_CORE_VERSION + "/dist/umd/ffmpeg-core.js";
+var FFMPEG_WASM_URL = "https://unpkg.com/@ffmpeg/core@" + FFMPEG_CORE_VERSION + "/dist/umd/ffmpeg-core.wasm";
+var _ffmpegPromise = null;
+function loadFFmpeg(onProgress) {
+  if (_ffmpegPromise) return _ffmpegPromise;
+  _ffmpegPromise = new Promise(function(resolve, reject) {
+    if (onProgress) onProgress("Loading converter (~30 MB, first time only)…");
+    var script = document.createElement("script");
+    script.src = FFMPEG_LIB_URL;
+    script.onload = function() {
+      var Ctor =
+        (window.FFmpegWASM && window.FFmpegWASM.FFmpeg) ||
+        (window.FFmpeg && window.FFmpeg.FFmpeg);
+      if (!Ctor) return reject(new Error("ffmpeg.js loaded but FFmpeg class not exposed on window"));
+      var ff = new Ctor();
+      ff.on("log", function(e) { log("[ffmpeg] " + e.message); });
+      if (onProgress) onProgress("Loading WASM core…");
+      ff.load({ coreURL: FFMPEG_CORE_URL, wasmURL: FFMPEG_WASM_URL }).then(function() {
+        resolve(ff);
+      }).catch(function(err) { _ffmpegPromise = null; reject(err); });
+    };
+    script.onerror = function() { _ffmpegPromise = null; reject(new Error("Failed to load ffmpeg.js from unpkg.com — network blocked or allowedDomains not set.")); };
+    document.head.appendChild(script);
+  });
+  return _ffmpegPromise;
+}
+// Convert a MOV/QuickTime file to WebM + VP9 + alpha via ffmpeg.wasm. Resolves to
+// a new File (with .webm extension) that can be passed into loadVideo /
+// loadKeyArtVideo / loadElementVideo. Rejects on any loader or conversion error.
+async function convertMovToWebm(file, toast) {
+  var ff = await loadFFmpeg(function(msg) { if (toast) toast.update("<strong>" + file.name + "</strong><br>" + msg); });
+  if (toast) toast.update("<strong>" + file.name + "</strong><br>Converting to WebM + VP9 alpha…");
+  var ext = (file.name.split('.').pop() || "mov").toLowerCase();
+  var inputName = "input." + ext;
+  var outputName = "output.webm";
+  var buf = new Uint8Array(await file.arrayBuffer());
+  await ff.writeFile(inputName, buf);
+  try {
+    await ff.exec(["-i", inputName, "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "4M", "-auto-alt-ref", "0", outputName]);
+  } finally {
+    try { await ff.deleteFile(inputName); } catch (e) {}
+  }
+  var data = await ff.readFile(outputName);
+  try { await ff.deleteFile(outputName); } catch (e) {}
+  var blob = new Blob([data.buffer], { type: "video/webm" });
+  var outName = file.name.replace(/\.(mov|qt)$/i, "") + ".webm";
+  return new File([blob], outName, { type: "video/webm" });
+}
+// Ensure a dropped file is playable by the browser. If it's a MOV/QT, convert
+// it through ffmpeg.wasm first. On any conversion failure, show the CLI toast
+// as a fallback and return null so callers short-circuit the load.
+async function coerceToPlayable(file) {
+  if (!looksLikeMov(file)) return file;
+  var toast = createToast({ id: "mov-convert" });
+  toast.update("<strong>" + file.name + "</strong><br>Preparing converter…");
+  try {
+    var converted = await convertMovToWebm(file, toast);
+    toast.update("<strong>Converted ✓</strong><br>" + converted.name + " (" + (converted.size / 1048576).toFixed(1) + " MB)");
+    setTimeout(function() { toast.close(); }, 3000);
+    log("Converted " + file.name + " → " + converted.name + " via ffmpeg.wasm");
+    return converted;
+  } catch (e) {
+    log("ffmpeg.wasm conversion failed: " + e.message, "err");
+    toast.close();
+    showMovCliToast(file);
+    return null;
+  }
 }
 
 // ── ELEMENT VIDEO (per-name replacement, shared across variants) ──
 // Keyed by normalized layer name so one drop applies to every same-named layer
 // across every variant — same convention as Key Art slots.
-function loadElementVideo(nameKey, file) {
-  if (looksLikeMov(file)) { showMovToast(file); return; }
+async function loadElementVideo(nameKey, file) {
+  file = await coerceToPlayable(file); if (!file) return;
   var url = URL.createObjectURL(file);
   var v = document.createElement("video");
   var prev = state.elementVideos[nameKey] || {};
