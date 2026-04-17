@@ -608,8 +608,8 @@ function drawSingle(c, el, lineIndex, t) {
     c.beginPath(); c.rect(dx, dy, dw * tr.clipFrac, dh); c.clip();
   }
 
-  // Per-instance video (overrides static) — render the video cover-fit into the element's rect.
-  var ev = state.elementVideos[el.id];
+  // Per-instance video (overrides static) — shared across variants by normalized name.
+  var ev = state.elementVideos[el.normalizedName];
   var kv = el.keyArtSlot ? state.keyArtVideos[el.keyArtSlot] : null;
   if (ev && ev.video && ev.video.readyState >= 2) {
     drawCoverInto(c, ev.video, dx, dy, dw, dh);
@@ -929,7 +929,7 @@ function showAnimEmpty() {
 }
 
 function refreshElementVideoUI(el) {
-  var ev = state.elementVideos[el.id];
+  var ev = state.elementVideos[el.normalizedName];
   var drop = $("dropElementVideo");
   drop.classList.toggle("has-file", !!(ev && ev.file));
   drop.childNodes.forEach && drop.childNodes.forEach(function() {});
@@ -1016,6 +1016,37 @@ function forEachKeyArtVideo(fn) {
 
 // Seek a video and wait for the decoder to land on the new frame. A 300 ms fallback
 // timeout keeps the export from hanging if a decode hiccup swallows the seeked event.
+// Wait for a video's decoder to have at least one frame ready (readyState >= 2).
+// Resolves immediately if already ready. 1 s fallback so we never hang the export.
+function waitForVideoReady(video) {
+  return new Promise(function(resolve) {
+    if (!video) return resolve();
+    if (video.readyState >= 2) return resolve();
+    var done = false;
+    var fin = function() { if (done) return; done = true; video.removeEventListener("loadeddata", fin); video.removeEventListener("canplay", fin); resolve(); };
+    video.addEventListener("loadeddata", fin);
+    video.addEventListener("canplay", fin);
+    setTimeout(fin, 1000);
+  });
+}
+// Start a video playing and wait until it has painted a real frame, not just the
+// seek-to-0 poster. Uses requestVideoFrameCallback when available for sub-frame
+// precision; falls back to a 120 ms pause. Prevents the "first frame of the export
+// shows the static PNG" flash.
+function waitForFirstPlayingFrame(video) {
+  return new Promise(function(resolve) {
+    if (!video) return resolve();
+    var done = false;
+    var fin = function() { if (done) return; done = true; resolve(); };
+    try { video.play().catch(function(){}); } catch (e) {}
+    if (video.requestVideoFrameCallback) {
+      video.requestVideoFrameCallback(function() { fin(); });
+      setTimeout(fin, 500);
+    } else {
+      setTimeout(fin, 120);
+    }
+  });
+}
 function awaitVideoSeek(video, targetTime) {
   return new Promise(function(resolve) {
     if (!video || video.readyState < 2) return resolve();
@@ -1287,10 +1318,30 @@ async function exportVariant(frame, variantIndex, variantTotal, mimeType, bitrat
   // on wall-clock, so the recorded timeline must match wall time. The render loop
   // below paces itself precisely at 1000/fps so one wall-second of recording
   // corresponds to one nominal second of output.
-  if (state.bgVideo) { try { state.bgVideo.currentTime = 0; state.bgVideo.play().catch(function(){}); } catch (e) {} }
   var kvs = keyArtVideosArr();
-  kvs.forEach(function(kv) { if (kv.video) { try { kv.video.currentTime = 0; kv.video.play().catch(function(){}); } catch (e) {} } });
-  forEachElementVideo(function(ev) { try { ev.video.currentTime = 0; ev.video.play().catch(function(){}); } catch (e) {} });
+  var allVids = [];
+  if (state.bgVideo) allVids.push(state.bgVideo);
+  kvs.forEach(function(kv) { if (kv.video) allVids.push(kv.video); });
+  Object.keys(state.elementVideos).forEach(function(k) { if (state.elementVideos[k].video) allVids.push(state.elementVideos[k].video); });
+
+  // Seek each to 0 (still-frame) and wait for the decoder to be ready, so the first
+  // rendered frame of the export already has video pixels instead of falling back
+  // to the static PNG for one tick.
+  allVids.forEach(function(v) { try { v.currentTime = 0; } catch (e) {} });
+  if (allVids.length) await Promise.all(allVids.map(waitForVideoReady));
+  // Kick off playback and wait until every video has painted its first frame post-play.
+  if (allVids.length) await Promise.all(allVids.map(waitForFirstPlayingFrame));
+
+  // Prime the canvas with frame 0 BEFORE starting the recorder so the sampler's
+  // first capture isn't a blank/clear canvas. This is the second half of the
+  // first-frame fix — otherwise the MediaRecorder would lock in a blank frame as
+  // the video's initial state.
+  offCtx.save();
+  offCtx.clearRect(0, 0, expW, expH);
+  offCtx.scale(expW / frame.width, expH / frame.height);
+  composeFrame(offCtx, frame, frame.width, frame.height, 0);
+  offCtx.restore();
+
   recorder.start();
 
   var sx = expW / frame.width, sy = expH / frame.height;
@@ -1308,6 +1359,12 @@ async function exportVariant(frame, variantIndex, variantTotal, mimeType, bitrat
     var now = performance.now();
     if (now < targetWall) {
       await new Promise(function(r) { setTimeout(r, targetWall - now); });
+    } else if (now > targetWall + frameMs * 2) {
+      // Fell more than 2 frames behind — render load exceeds frame budget. Log once.
+      if (!state._slowExportLogged) {
+        log("Export rendering is slower than " + fps + " fps. Output may stutter. Consider lowering resolution or fps.", "warn");
+        state._slowExportLogged = true;
+      }
     }
 
     offCtx.save();
@@ -1315,9 +1372,14 @@ async function exportVariant(frame, variantIndex, variantTotal, mimeType, bitrat
     offCtx.scale(sx, sy);
     composeFrame(offCtx, frame, frame.width, frame.height, t);
     offCtx.restore();
+
+    // Yield one browser frame so the compositor can flush the canvas bitmap and
+    // the captureStream sampler has a chance to pull it before we overwrite next.
+    await new Promise(function(r) { requestAnimationFrame(function() { r(); }); });
   }
   // Hold the last frame for one slot so the sampler captures it.
   await new Promise(function(r) { setTimeout(r, frameMs); });
+  state._slowExportLogged = false;
 
   // Pause video sources so they don't keep playing after export.
   if (state.bgVideo) try { state.bgVideo.pause(); } catch (e) {}
@@ -1589,36 +1651,38 @@ function showMovToast(file) {
   setTimeout(function() { if (t.parentNode) t.remove(); }, 20000);
 }
 
-// ── ELEMENT VIDEO (per-instance replacement) ──
-function loadElementVideo(elementId, file) {
+// ── ELEMENT VIDEO (per-name replacement, shared across variants) ──
+// Keyed by normalized layer name so one drop applies to every same-named layer
+// across every variant — same convention as Key Art slots.
+function loadElementVideo(nameKey, file) {
   if (looksLikeMov(file)) { showMovToast(file); return; }
   var url = URL.createObjectURL(file);
   var v = document.createElement("video");
-  var prev = state.elementVideos[elementId] || {};
+  var prev = state.elementVideos[nameKey] || {};
   v.src = url; v.muted = true;
   v.loop = prev.loop !== false;
   v.playsInline = true; v.preload = "auto";
   v.addEventListener("loadeddata", function() {
-    state.elementVideos[elementId] = { file: file, video: v, loop: prev.loop !== false };
-    log("Element video loaded for id " + elementId + ": " + file.name);
+    state.elementVideos[nameKey] = { file: file, video: v, loop: prev.loop !== false };
+    log("Element video loaded for '" + nameKey + "': " + file.name);
     var f = currentFrame();
     if (f && state.selectedElementIndex >= 0) {
       var el = f.elements[state.selectedElementIndex];
-      if (el && el.id === elementId) refreshElementVideoUI(el);
+      if (el && el.normalizedName === nameKey) refreshElementVideoUI(el);
     }
     renderFrame(state.currentTime);
   });
   v.addEventListener("error", function() { log("Failed to decode video. May be ProRes/MOV — see toast.", "err"); showMovToast(file); });
   v.load();
 }
-function removeElementVideo(elementId) {
-  var ev = state.elementVideos[elementId];
+function removeElementVideo(nameKey) {
+  var ev = state.elementVideos[nameKey];
   if (ev && ev.video) { try { ev.video.pause(); } catch (e) {} }
-  delete state.elementVideos[elementId];
+  delete state.elementVideos[nameKey];
   var f = currentFrame();
   if (f && state.selectedElementIndex >= 0) {
     var el = f.elements[state.selectedElementIndex];
-    if (el && el.id === elementId) refreshElementVideoUI(el);
+    if (el && el.normalizedName === nameKey) refreshElementVideoUI(el);
   }
   renderFrame(state.currentTime);
 }
@@ -1632,15 +1696,15 @@ function forEachElementVideo(fn) {
 // Wire element-video drop zone + controls.
 setupFileDrop("dropElementVideo", "inputElementVideo", function(file) {
   var f = currentFrame(); if (!f || state.selectedElementIndex < 0) { log("Select an element first.", "warn"); return; }
-  loadElementVideo(f.elements[state.selectedElementIndex].id, file);
+  loadElementVideo(f.elements[state.selectedElementIndex].normalizedName, file);
 });
 $("btnRemoveElementVideo").addEventListener("click", function() {
   var f = currentFrame(); if (!f || state.selectedElementIndex < 0) return;
-  removeElementVideo(f.elements[state.selectedElementIndex].id);
+  removeElementVideo(f.elements[state.selectedElementIndex].normalizedName);
 });
 $("chkElVideoLoop").addEventListener("change", function() {
   var f = currentFrame(); if (!f || state.selectedElementIndex < 0) return;
-  var ev = state.elementVideos[f.elements[state.selectedElementIndex].id];
+  var ev = state.elementVideos[f.elements[state.selectedElementIndex].normalizedName];
   if (ev) { ev.loop = this.checked; if (ev.video) ev.video.loop = this.checked; }
 });
 
