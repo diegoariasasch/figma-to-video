@@ -126,17 +126,19 @@ To wipe all saved presets and settings: open the plugin's debug panel, run `loca
 
 ## Alpha channel workflow
 
-Chromium (and therefore Figma desktop) can decode **WebM with VP9 alpha** (`yuva420p`). It cannot decode ProRes / ProRes 4444 MOV.
+Chromium (and therefore Figma desktop) can decode **WebM with VP9 alpha** (`yuva420p`). It cannot decode ProRes / ProRes 4444 MOV directly.
 
-When you drop a `.mov` into any video field, the plugin shows a toast with the exact `ffmpeg` command you need:
+**In-plugin conversion (recommended).** When you drop a `.mov` / `.qt` into any video field, the plugin lazily loads `ffmpeg.wasm` from `unpkg.com` (first drop only: one-time ~30 MB download; cached afterwards) and transcodes to WebM + VP9 + alpha in the browser. Status is shown in a toast (`Loading converter…` → `Converting…` → `Converted ✓`), then the resulting WebM is loaded automatically. Conversion runs roughly 1–3× real time depending on clip length and resolution.
+
+Under the hood the plugin runs:
 
 ```
 ffmpeg -i input.mov -c:v libvpx-vp9 -pix_fmt yuva420p -b:v 4M -auto-alt-ref 0 output.webm
 ```
 
-This preserves the alpha channel. Drop the resulting `.webm` back in and the logo composites with transparency over whatever's underneath (Key Art, Background Video, frame background).
+**CLI fallback.** If the loader can't fetch `ffmpeg.wasm` (network blocked, CDN unavailable, plugin sandbox CSP), the plugin shows the exact command above in a toast so you can run it locally and drop the resulting `.webm` back in.
 
-The exported file is also WebM (or MP4 where supported); WebM + VP9 alpha is the end-to-end alpha-capable format.
+Either way: the exported file is WebM (or MP4 where supported); WebM + VP9 alpha is the end-to-end alpha-capable format, so transparency flows through from your source logo to the final render.
 
 ---
 
@@ -156,7 +158,7 @@ Behavior:
 - **Fresh check on every plugin open** (`cache: "no-store"`), so the kill takes effect as soon as Figma re-opens the plugin.
 - **No telemetry**: the fetch sends no user data; it's a GET for a single JSON file.
 
-The plugin only talks to allowlisted domains (`gist.githubusercontent.com`, `raw.githubusercontent.com`). Change these in `manifest.json`'s `networkAccess.allowedDomains` if you want to host the kill-switch file elsewhere.
+The plugin only talks to allowlisted domains (`gist.githubusercontent.com`, `raw.githubusercontent.com`, `unpkg.com`). Edit `manifest.json`'s `networkAccess.allowedDomains` to host the kill-switch file or the ffmpeg.wasm bundle elsewhere.
 
 ---
 
