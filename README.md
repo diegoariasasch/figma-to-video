@@ -1,97 +1,202 @@
 # Frame to Video — Figma Plugin
 
-Export Figma frames as animated 1080p videos with background video, music, and element animations. Supports **frame sets** (Sections with many variants) and **Key Art video replacement** for a consistent look across differently-sized frames.
+Turn a Figma **Section** (or a single Frame) into animated videos — one per frame variant — with combinable element animations, per-line text animation, background video and audio, per-instance video replacement, Key Art video slots, and per-variant filename control.
+
+---
 
 ## Installation
 
-1. In Figma, go to **Plugins → Development → Import plugin from manifest…**
-2. Select the `manifest.json` from this folder
-3. The plugin appears under Plugins → Development → Frame to Video
+1. Clone this repo.
+2. In Figma desktop: **Plugins → Development → Import plugin from manifest…**
+3. Select `manifest.json`.
+4. The plugin appears under **Plugins → Development → Frame to Video**.
 
-## How to Use
+The plugin window is 1200 × 720 and uses a 5-column layout (Variants · Elements · Animation · Canvas · Settings).
 
-### 1. Load a Selection
-You can select either:
-- **A single Frame** (Component/Instance/Group also work) — loaded as a 1-variant set, or
-- **A Section** containing multiple sibling frames — every child frame is loaded as a **variant** of the same set
+---
 
-Click **"Load Selection"**. The plugin exports each variant's direct children as high-res PNGs.
+## Concepts
 
-Each variant appears in the **Variants** list (left panel) with its dimensions and an editable filename. Click a variant to preview it.
+- **Variant**: one child frame of a Section. A Section containing three frames (say a square, a landscape, and a portrait) becomes a **set** of three variants that share animation settings and media.
+- **Element**: one direct child of a variant frame, exported as a high-res (2×) PNG and composited on an HTML5 canvas.
+- **Animation preset**: a per-element (or per-line) animation config. Presets are keyed by the layer's normalized name (lowercase, spaces stripped) so they're shared across variants and across plugin reopens.
+- **Key Art slot**: a layer named `KeyArt N` (case- and space-insensitive) that becomes a video-replaceable slot across every variant.
+- **Element video**: a per-instance video replacement on a specific element you click on. Independent of Key Art naming.
 
-### 2. Key Art Video Replacement
-Any layer whose name matches `KeyArt N` (case- and space-insensitive — `KeyArt 1`, `keyart1`, `KEY ART 1`, `KEYART1` all work) is detected as a **Key Art slot**. These appear in the **Key Art Videos** panel on the right.
+---
 
-- Drop a video into a slot → it replaces the static Key Art image in every variant that contains that slot, **at the exact position and size the static Key Art occupies in each variant**.
-- This means scale/position auto-match across frame sizes. Author your video at the reference aspect ratio; if the variant rect differs slightly, the video is center-cropped (cover-fit).
-- Each slot has its own loop and opacity controls.
+## How to use
 
-### 3. Configure Animations
-Click any element in the Elements list. Choose an animation type:
-- **Fade In** — opacity 0→1
-- **Slide from Left/Right/Top/Bottom** — slide in with fade
-- **Scale In** — scales from 30% to 100% with fade
-- **Text Reveal →** — progressive left-to-right clip reveal
+### 1. Load a selection
 
-Set **Start**, **Duration**, **Distance**, and **Easing**. Click **"Apply to Element"** or **"Apply to All"**.
+Select **one** of:
+- a **Section** containing child frames → loaded as a multi-variant set, or
+- a single **Frame / Component / Instance / Group** → loaded as a 1-variant set.
 
-Animations are **shared across the set** by element name — applying Fade In to `Headline` in one variant applies it to every variant's `Headline`. (Matching is case- and space-insensitive, same rules as Key Art.)
+Click **Load Selection**. Each variant's direct children are exported as PNGs at 2× scale. The debug panel logs each ingested element and reports which text layers split into multiple lines.
 
-**Per-line animation:** Text layers with explicit line breaks (you pressed Enter between lines in Figma) automatically split into `Line 1 … Line N` rows in the Elements list — each independently animatable, each keyed by `<name>__lineN` so presets are still shared across variants. Auto-wrapped text (a single run that wraps because the box is narrow) stays as one element since Figma's read API doesn't expose wrap positions. To animate wrapped copy line-by-line, add explicit newlines in Figma. The debug panel logs a hint ("press Enter between lines…") for every text layer it couldn't split.
+### 2. Animate elements
 
-### 4. Add Background Media (Set-Wide)
-- **Background Video**: plays behind all elements in every variant (cover-fit), adjustable opacity
-- **Background Audio**: muxed into every export with volume control
+Click an element in the **Elements** column. The **Animation** column shows:
 
-### 5. Preview
-- Use ▶ / ⏸ to play/pause
-- Click the timeline to scrub
-- Adjust **Duration** in the right panel for total video length
-- Switch variants in the left panel to preview each one
+- **Effects** (all combinable — check any combination):
+  - `Fade In` — opacity 0 → 1
+  - `Scale In` — 30% → 100%
+  - `Text Reveal (L→R)` — progressive left-to-right clip
+  - `Slide from` dropdown — `Left` / `Right` / `Top` / `Bottom` (unset = no slide)
+- **Start (s)** — when the animation begins in the video's timeline
+- **Duration (s)** — how long the animation runs
+- **Easing** — Ease Out / Ease In-Out / Ease In / Linear
+- **Distance (px)** — offset for Slide effects (100 = slides 100px into place)
 
-### 6. Export
-- Set resolution (1080p default), frame rate (30fps default), and quality
-- Each variant has an **editable filename** defaulting to `<SectionName>_<FrameName>` (sanitized)
-- Click **"Export Video"** — the plugin renders every variant sequentially and triggers a download for each
-- MP4 auto-detected on recent Chrome/Figma desktop; otherwise WebM
+Click **Apply to Element** to commit the preset. The row in the Elements list gets a badge summarising active effects (e.g. `fade+slide up`).
 
-## Architecture
+**Combining effects example:** check `Fade In`, set `Slide from: Bottom`, Duration 0.4s, Easing Ease Out → the element fades AND slides up into place simultaneously.
+
+**Apply to All** applies the current effect config to every element across every variant, auto-staggering start times by 0.15 s.
+**Clear** removes the preset for the currently selected element (or line).
+
+### 3. Per-line text animation
+
+If a text layer in Figma contains explicit line breaks (you pressed **Enter** between lines), the plugin detects this and shows the layer as:
 
 ```
-manifest.json     → Plugin config
-code.js           → Figma main thread: reads Section or Frame,
-                    iterates frame children, exports each as a high-res PNG
-ui.html           → Plugin UI (all-in-one):
-                      ├── State: frames[] (variants), animPresets, keyArtVideos (per-slot)
-                      ├── Key Art detection (name → "keyartN" slot)
-                      ├── Animation engine (shared across set by element name)
-                      ├── Canvas renderer (bg video + per-element static/video draw)
-                      ├── Playback controller (real-time preview of current variant)
-                      ├── Media loader (bg + per-slot videos via Blob URLs)
-                      └── Export engine (iterates variants → MediaRecorder per variant)
+Text (3 lines)
+  Line 1: Hello
+  Line 2: World
+  Line 3: There
 ```
 
-## Technical Notes
+Each `Line N` row gets its own animation preset, keyed by `<layer>__lineN`. Click a line, apply an animation, repeat for the other lines with staggered starts to sequence the reveal.
 
-- **Elements are exported at 2x scale** from Figma for crisp rendering, drawn at 1x size on canvas
-- **Export uses MediaRecorder API** — no external dependencies, runs entirely in-browser
-- **Audio muxing** uses AudioContext → MediaStreamDestination to combine audio + video streams
-- **Frame-accurate rendering**: Export loop renders each frame sequentially with `setTimeout` yields
-- **MP4 support**: Auto-detected via `MediaRecorder.isTypeSupported('video/mp4;codecs=avc1')` — available on recent Chromium builds (Figma desktop). Falls back to VP9 WebM.
-- **No external dependencies** — everything is vanilla JS, no npm/build step required
+Line detection handles `\n`, `\r\n`, `\r`, `\u2028`, and `\u2029` separators. **Auto-wrapped text** (no explicit newline — breaks only because the box is narrow) stays as a single element; Figma's read API doesn't expose wrap positions. To animate wrapped copy line-by-line, add Enters in Figma. The debug panel logs the detection state for every text layer.
 
-## Limitations & Future Improvements
+### 4. Per-instance video replacement
 
-- **Nested frames**: Currently only reads direct children of each variant frame. Deep nesting would require recursive export.
-- **Fonts in typewriter**: True character-by-character typewriter would require font rendering on canvas. Current "Text Reveal" does a clean left-to-right clip instead.
-- **Video seeking precision**: Background + Key Art video frame accuracy depends on browser's video decoder. For frame-perfect sync, pre-render the source video to an image sequence.
-- **Large frames**: Very large frames (4K+) with many elements may be slow to export due to canvas compositing.
-- **Key Art aspect mismatch**: If the Key Art video's aspect differs from a variant's Key Art rect, the video is center-cropped (cover-fit). For best results, author one video per dominant aspect and author multiple Key Arts (`KeyArt 1` for landscape, `KeyArt 2` for portrait, etc.).
+In the Animation column, below the effect controls, a **Replace with video** drop-zone swaps the static PNG for that specific element with a video — keeping the element's exact position, size, and any animations. Perfect for animated logos or motion badges.
 
-## Converting WebM → MP4 (if needed)
+- Supported: WebM (VP9 / VP8, with alpha if encoded that way), MP4 (H.264), AV1.
+- **Not supported:** MOV / ProRes / ProRes 4444. The plugin detects `.mov` drops and displays a ready-to-paste `ffmpeg` conversion command (see *Alpha channel workflow* below).
+- Tick **Loop** to cycle the video if the element's on-screen time exceeds the video's duration.
 
-If the export produces WebM and you need MP4 for social platforms:
+Per-instance videos auto-play in the preview and are recorded in the export.
 
-```bash
-ffmpeg -i video.webm -c:v libx264 -crf 18 -preset slow -c:a aac -b:a 192k output.mp4
+### 5. Key Art slots (by name, shared across variants)
+
+Any Figma layer whose name normalizes to `keyart1`, `keyart2`, etc. (so `KeyArt 1`, `KEYART1`, `key art 2` all match) becomes a slot in the **Key Art Videos** section of the right panel. Drop one video per slot and every variant that contains that slot renders the video at the rect the static Key Art occupies in that variant.
+
+Use Key Art slots when you want one video to serve a group of variants (square hero, portrait hero, landscape hero) via the same-named layer in each. Use per-instance replacement when you want to swap one specific element.
+
+### 6. Background video and audio
+
+- **Background Video**: plays behind all elements in every variant (cover-fit). Supports opacity and loop toggle.
+- **Background Audio**: muxed into every exported file with volume control.
+
+Both use the same MOV detection as other video drops.
+
+### 7. Export
+
+Right panel → **Export** section:
+
+- **Format**: MP4 (H.264) when the Chromium build supports it, else WebM.
+- **Quality target**: toggle between
+  - **Bitrate (Mbps)** — direct bitrate control (default **25 Mbps**), or
+  - **Target file size (MB)** — plugin derives the bitrate from `(MB × 8) / duration × 0.95` (5 % headroom buffer).
+- **Duration** / **Frame rate** / **Resolution** live in the **Video Settings** section above.
+
+Click **Export Video**. Each variant is rendered and downloaded sequentially, with its filename taken from the editable field in the Variants column (default `<SectionName>_<FrameName>`, sanitized).
+
+During export: all videos play forward at real-time 1× speed, the render loop paces precisely at `1000/fps` ms per frame, and MediaRecorder captures the offscreen canvas continuously. A 6 s export takes ~6 s of wall time and produces a 6 s file.
+
+---
+
+## Settings persistence
+
+On any change, the plugin saves to browser `localStorage` (scoped to the plugin iframe):
+
+- All export / video settings (duration, fps, resolution, bitrate, quality mode, target MB, opacity, audio volume, bg-video loop flag)
+- The preview loop toggle
+- Every animation preset (keyed by normalized name / line index)
+
+Closing Figma and reopening the plugin restores every setting and every preset. Media files (bg video, audio, Key Art videos, element videos) are not persisted because browser sandboxes can't reconstruct `File` objects from disk paths — reload those each session.
+
+To wipe all saved presets and settings: open the plugin's debug panel, run `localStorage.clear()` from your browser dev tools (Figma desktop → View → Debug), or reload the plugin with an incognito profile.
+
+---
+
+## Alpha channel workflow
+
+Chromium (and therefore Figma desktop) can decode **WebM with VP9 alpha** (`yuva420p`). It cannot decode ProRes / ProRes 4444 MOV.
+
+When you drop a `.mov` into any video field, the plugin shows a toast with the exact `ffmpeg` command you need:
+
 ```
+ffmpeg -i input.mov -c:v libvpx-vp9 -pix_fmt yuva420p -b:v 4M -auto-alt-ref 0 output.webm
+```
+
+This preserves the alpha channel. Drop the resulting `.webm` back in and the logo composites with transparency over whatever's underneath (Key Art, Background Video, frame background).
+
+The exported file is also WebM (or MP4 where supported); WebM + VP9 alpha is the end-to-end alpha-capable format.
+
+---
+
+## Remote kill switch
+
+The plugin supports an optional remote kill switch so you can disable every installed instance at once.
+
+1. Create a GitHub gist or repo file named `status.json` with content `{"disabled": false}`.
+2. Copy the **raw** URL (host must be `gist.githubusercontent.com` or `raw.githubusercontent.com` — both are allowlisted in `manifest.json`).
+3. Set `KILL_SWITCH_URL` at the top of `ui.html` to that URL.
+4. Reinstall the plugin (or ask users to re-import the manifest).
+
+To kill: edit the JSON to `{"disabled": true, "message": "Plugin disabled — contact admin."}`. On next plugin open, the UI is replaced with a disabled screen.
+
+Behavior:
+- **Fail-open:** if the fetch fails (offline, blocked, malformed JSON), the plugin runs normally.
+- **Fresh check on every plugin open** (`cache: "no-store"`), so the kill takes effect as soon as Figma re-opens the plugin.
+- **No telemetry**: the fetch sends no user data; it's a GET for a single JSON file.
+
+The plugin only talks to allowlisted domains (`gist.githubusercontent.com`, `raw.githubusercontent.com`). Change these in `manifest.json`'s `networkAccess.allowedDomains` if you want to host the kill-switch file elsewhere.
+
+---
+
+## Technical specs
+
+- **Architecture**
+  - `code.js` — Figma main thread. Validates the selection, walks frame children, exports each as a 2× PNG with absolute render bounds, posts messages to the UI.
+  - `ui.html` — single-file UI (HTML + CSS + JS). Compositing is done on an HTML5 canvas; export uses an offscreen canvas + `MediaStreamTrack` + `MediaRecorder`.
+  - `manifest.json` — plugin manifest (API 1.0.0), network allowlist for kill switch.
+- **Render pipeline**
+  - Single source of truth: `composeFrame(c, frame, w, h, t)` paints the background colour, the bg video (cover-fit with opacity), then every element via `drawElement(c, el, t)`. Called by both preview and export — structurally impossible to diverge.
+  - Per-element draw first checks `state.elementVideos[el.id]` (per-instance replacement), then `state.keyArtVideos[el.keyArtSlot]`, then falls back to the static PNG.
+  - Multi-line text is drawn as N horizontal band slices of the same PNG (`ctx.drawImage` 9-arg form) at `y + i × bandHeight`.
+- **Export**
+  - `offCanvas = <canvas>` sized to chosen output resolution.
+  - `stream = offCanvas.captureStream(fps)` — browser samples on wall-clock.
+  - All videos are `.play()`-ed at export start so they advance at 1×. No per-frame seeks.
+  - Render loop paces to exactly `1000 / fps` ms per frame via `performance.now()` — wall time equals nominal duration.
+  - `MediaRecorder` writes chunks; on stop, they're blob-joined and triggered as a download with the per-variant filename.
+- **Animation engine**
+  - Preset shape: `{ effects: {fade, slide, scale, textReveal}, start, duration, easing, distance }`.
+  - `computeAnimTransform(a, t)` returns `{opacity, offsetX, offsetY, scaleVal, clipFrac}` — effects compose additively/multiplicatively.
+  - Easings: `easeOut` (cubic), `easeIn`, `easeInOut`, `linear`.
+- **Persistence** — `localStorage` keys `f2v.animPresets.v2` and `f2v.settings.v1`.
+- **Supported video codecs** — whatever Chromium's `<video>` supports. In practice: VP8, VP9 (with alpha), AV1, H.264. ProRes/MOV: **not** decodable — transcode to VP9 alpha.
+
+---
+
+## Limitations
+
+- **Nested frames**: the plugin walks direct children only. Deep hierarchies would require a recursive exporter.
+- **Auto-wrapped text**: can't be split per-line (Figma read API doesn't expose wrap points). Use explicit Enters.
+- **Mixed per-range styles across lines**: a multi-line text with line 1 at 48 px and line 2 at 24 px splits into equal-height bands (`renderH / lineCount`), so the bands will visually misalign.
+- **Large frames**: 4K+ frames with many elements may be slow to render per frame — export time = duration, and if the render can't finish within `1000/fps` ms the recorder samples duplicate frames (manifests as visible stutter).
+- **ProRes MOV**: not decodable. Transcode to WebM VP9 alpha.
+
+---
+
+## Workflow conventions (for contributors)
+
+- Branch: `claude/<thing>`. Development happens on the branch, not `main`.
+- After any batch of commits, open a PR to `main` and merge it (see `CLAUDE.md` for the full auto-merge workflow).
+- Enable **Repo Settings → General → Pull Requests → "Automatically delete head branches"** so merged feature branches are cleaned up server-side.

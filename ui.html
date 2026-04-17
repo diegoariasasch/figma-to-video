@@ -29,13 +29,27 @@
     padding: 8px 12px; background: var(--bg-tertiary); border-bottom: 1px solid var(--border); flex-shrink: 0;
   }
   .main { display: flex; flex: 1; min-height: 0; }
-  .panel-left {
-    width: 260px; min-width: 260px; background: var(--bg-secondary);
+  .panel-variants {
+    width: 170px; min-width: 170px; background: var(--bg-secondary);
     border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden;
   }
+  .panel-elements {
+    width: 210px; min-width: 210px; background: var(--bg-secondary);
+    border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden;
+  }
+  .panel-anim {
+    width: 240px; min-width: 240px; background: var(--bg-secondary);
+    border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden;
+  }
+  .panel-head {
+    padding: 8px 12px; font-weight: 600; font-size: 11px; color: var(--text-secondary);
+    text-transform: uppercase; letter-spacing: 0.5px;
+    border-bottom: 1px solid var(--border); flex-shrink: 0;
+  }
+  .panel-body { flex: 1; overflow-y: auto; }
   .panel-center { flex: 1; display: flex; flex-direction: column; min-width: 0; }
   .panel-right {
-    width: 240px; min-width: 240px; background: var(--bg-secondary);
+    width: 230px; min-width: 230px; background: var(--bg-secondary);
     border-left: 1px solid var(--border); overflow-y: auto; padding: 12px;
   }
   .canvas-area {
@@ -68,9 +82,7 @@
   select:focus, input:focus { border-color: var(--accent); }
   input[type="range"] { width: 100%; cursor: pointer; }
   label { font-size: 11px; color: var(--text-secondary); display: block; margin-bottom: 3px; }
-  .variant-list {
-    max-height: 35%; overflow-y: auto; border-bottom: 1px solid var(--border); flex-shrink: 0;
-  }
+  .variant-list { flex: 1; overflow-y: auto; }
   .variant-item {
     padding: 6px 12px; border-bottom: 1px solid var(--border);
     cursor: pointer; transition: background 0.1s;
@@ -130,11 +142,39 @@
   .element-item.is-line-child {
     padding-left: 24px; background: rgba(0,0,0,0.08);
   }
-  .anim-config {
-    padding: 12px; border-top: 1px solid var(--border);
-    max-height: 280px; overflow-y: auto; flex-shrink: 0;
+  .anim-config { padding: 12px; overflow-y: auto; flex: 1; }
+  .anim-config .anim-title { font-size: 12px; margin-bottom: 8px; color: var(--accent); font-weight: 600; }
+  .anim-effects { margin-bottom: 10px; padding: 8px; background: rgba(0,0,0,0.1); border-radius: var(--radius); }
+  .anim-effects label { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; cursor: pointer; color: var(--text-primary); }
+  .anim-effects label input[type="checkbox"] { cursor: pointer; }
+  .anim-effects .slide-row { display: flex; align-items: center; gap: 6px; margin-top: 2px; }
+  .anim-effects .slide-row label { margin: 0; cursor: default; color: var(--text-secondary); }
+  .anim-empty {
+    padding: 18px 12px; color: var(--text-secondary); font-size: 10px; line-height: 1.5; text-align: center;
   }
-  .anim-config h3 { font-size: 12px; margin-bottom: 8px; color: var(--accent); }
+  .divider { height: 1px; background: var(--border); margin: 10px 0; border: 0; }
+  .mini-label { font-size: 10px; color: var(--text-secondary); margin-bottom: 4px; }
+  .toast {
+    position: absolute; bottom: 60px; left: 50%; transform: translateX(-50%);
+    background: var(--bg-tertiary); color: var(--text-primary);
+    border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 12px 16px; z-index: 20; max-width: 640px; font-size: 11px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+  }
+  .toast.err { border-color: var(--danger); }
+  .toast code {
+    display: block; background: #000; color: #9f9; padding: 6px 8px; margin-top: 6px;
+    font-family: "SF Mono", Monaco, Consolas, monospace; font-size: 10px;
+    border-radius: 4px; white-space: pre-wrap; word-break: break-all;
+  }
+  .toast .toast-close { float: right; cursor: pointer; color: var(--text-secondary); margin-left: 10px; }
+  .disabled-screen {
+    position: fixed; inset: 0; background: var(--bg-primary);
+    display: flex; align-items: center; justify-content: center; flex-direction: column;
+    gap: 12px; padding: 40px; z-index: 100; text-align: center;
+  }
+  .disabled-screen h1 { font-size: 18px; color: var(--danger); margin-bottom: 4px; }
+  .disabled-screen p { font-size: 12px; color: var(--text-secondary); max-width: 380px; line-height: 1.5; }
   .field-row { display: flex; gap: 8px; margin-bottom: 8px; align-items: flex-end; }
   .field-row .field { flex: 1; }
   .field-row select, .field-row input[type="number"] { width: 100%; }
@@ -204,59 +244,84 @@
     <span id="frameSize" style="color:var(--text-secondary); font-size:11px;"></span>
   </div>
   <div class="main">
-    <div class="panel-left">
-      <div style="padding:8px 12px; font-weight:600; font-size:11px; color:var(--text-secondary); text-transform:uppercase; letter-spacing:0.5px; border-bottom:1px solid var(--border);">Variants</div>
+    <div class="panel-variants">
+      <div class="panel-head">Variants</div>
       <div class="variant-list" id="variantList">
         <div style="padding:12px; color:var(--text-secondary); font-size:10px;">Select a Section or Frame, then Load.</div>
       </div>
-      <div style="padding:8px 12px; font-weight:600; font-size:11px; color:var(--text-secondary); text-transform:uppercase; letter-spacing:0.5px; border-bottom:1px solid var(--border); border-top:1px solid var(--border);">Elements</div>
+    </div>
+    <div class="panel-elements">
+      <div class="panel-head">Elements</div>
       <div class="element-list" id="elementList">
         <div style="padding:20px; text-align:center; color:var(--text-secondary); font-size:10px;">Load a frame to see its elements</div>
       </div>
-      <div class="anim-config" id="animConfig" style="display:none;">
-        <h3 id="animTitle">Animation</h3>
-        <div class="field-row">
-          <div class="field">
-            <label>Type</label>
-            <select id="animType">
-              <option value="none">None</option>
-              <option value="fadeIn">Fade In</option>
-              <option value="slideLeft">Slide from Left</option>
-              <option value="slideRight">Slide from Right</option>
-              <option value="slideUp">Slide from Bottom</option>
-              <option value="slideDown">Slide from Top</option>
-              <option value="scaleIn">Scale In</option>
-              <option value="textReveal">Text Reveal</option>
-            </select>
+    </div>
+    <div class="panel-anim">
+      <div class="panel-head">Animation</div>
+      <div class="panel-body">
+        <div class="anim-empty" id="animEmpty">Select an element to configure its animation.</div>
+        <div class="anim-config" id="animConfig" style="display:none;">
+          <div class="anim-title" id="animTitle">Animation</div>
+          <div class="anim-effects">
+            <div class="mini-label">Effects (combinable)</div>
+            <label><input type="checkbox" id="animFade"> Fade In</label>
+            <label><input type="checkbox" id="animScale"> Scale In</label>
+            <label><input type="checkbox" id="animTextReveal"> Text Reveal (L→R)</label>
+            <div class="slide-row">
+              <label>Slide from</label>
+              <select id="animSlide" style="flex:1;">
+                <option value="">(none)</option>
+                <option value="left">Left</option>
+                <option value="right">Right</option>
+                <option value="up">Bottom</option>
+                <option value="down">Top</option>
+              </select>
+            </div>
           </div>
-          <div class="field">
-            <label>Easing</label>
-            <select id="animEasing">
-              <option value="easeOut">Ease Out</option>
-              <option value="easeInOut">Ease In-Out</option>
-              <option value="easeIn">Ease In</option>
-              <option value="linear">Linear</option>
-            </select>
+          <div class="field-row">
+            <div class="field">
+              <label>Start (s)</label>
+              <input type="number" id="animStart" value="0" min="0" max="30" step="0.1">
+            </div>
+            <div class="field">
+              <label>Duration (s)</label>
+              <input type="number" id="animDuration" value="0.5" min="0.1" max="10" step="0.1">
+            </div>
           </div>
-        </div>
-        <div class="field-row">
-          <div class="field">
-            <label>Start (s)</label>
-            <input type="number" id="animStart" value="0" min="0" max="30" step="0.1">
+          <div class="field-row">
+            <div class="field">
+              <label>Easing</label>
+              <select id="animEasing">
+                <option value="easeOut">Ease Out</option>
+                <option value="easeInOut">Ease In-Out</option>
+                <option value="easeIn">Ease In</option>
+                <option value="linear">Linear</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>Distance (px)</label>
+              <input type="number" id="animDistance" value="100" min="10" max="2000" step="10">
+            </div>
           </div>
-          <div class="field">
-            <label>Duration (s)</label>
-            <input type="number" id="animDuration" value="0.5" min="0.1" max="10" step="0.1">
+          <div style="margin-top:4px;"><button class="btn-secondary" id="btnApplyAnim" style="width:100%;">Apply to Element</button></div>
+          <div style="margin-top:6px; display:flex; gap:6px;">
+            <button class="btn-secondary" id="btnApplyAll" style="flex:1; font-size:10px;">Apply to All</button>
+            <button class="btn-secondary" id="btnClearAnim" style="flex:1; font-size:10px; color:var(--danger);">Clear</button>
           </div>
-          <div class="field">
-            <label>Distance (px)</label>
-            <input type="number" id="animDistance" value="100" min="10" max="2000" step="10">
+          <hr class="divider">
+          <div id="elementVideoSection">
+            <div class="mini-label">Replace with video</div>
+            <div class="file-drop" id="dropElementVideo" style="padding:8px; font-size:10px;">
+              <input type="file" id="inputElementVideo" accept="video/*">Click or drop video
+            </div>
+            <div style="margin-top:4px; display:flex; gap:6px; align-items:center;">
+              <label style="font-size:10px;"><input type="checkbox" id="chkElVideoLoop" checked> Loop</label>
+              <button class="btn-secondary" id="btnRemoveElementVideo" style="flex:1; font-size:10px; display:none;">Remove video</button>
+            </div>
+            <div style="font-size:10px; color:var(--text-secondary); margin-top:4px; line-height:1.4;">
+              Replaces this specific element with a video (keeps position and size). Useful for animated logos, badges, etc.
+            </div>
           </div>
-        </div>
-        <div style="margin-top:4px;"><button class="btn-secondary" id="btnApplyAnim" style="width:100%;">Apply to Element</button></div>
-        <div style="margin-top:6px; display:flex; gap:6px;">
-          <button class="btn-secondary" id="btnApplyAll" style="flex:1; font-size:10px;">Apply to All</button>
-          <button class="btn-secondary" id="btnClearAnim" style="flex:1; font-size:10px; color:var(--danger);">Clear</button>
         </div>
       </div>
     </div>
@@ -359,18 +424,55 @@ var state = {
   selectedFrameIndex: -1,
   selectedElementIndex: -1,
   selectedLineIndex: null,
-  animPresets: {},               // { normalizedName: { type, start, duration, easing, distance } }
+  animPresets: {},               // { key: { effects: {fade,slide,scale,textReveal}, start, duration, easing, distance } }
   keyArtVideos: {},              // { slotKey: { file, video, loop, opacity } }
-  currentTime: 0, duration: 5,
+  elementVideos: {},             // { elementId: { file, video, loop } } — per-instance replacement
+  currentTime: 0, duration: 6,
   playing: false, looping: false,
   playRafId: null, playStartWall: 0, playStartTime: 0,
   bgVideo: null, bgVideoOpacity: 1, bgVideoLoop: true,
   bgAudio: null, bgAudioVolume: 1,
-  exporting: false, exportCancel: false
+  exporting: false, exportCancel: false,
+  disabled: false                // set true if kill-switch returns disabled=true
 };
+
+// ── KILL SWITCH ──
+// If set to a URL that returns JSON { "disabled": true, "message"?: "..." }, the plugin
+// will refuse to run. Leave as empty string to skip (default). Host a gist or raw file
+// at github.com; manifest allowlists gist.githubusercontent.com + raw.githubusercontent.com.
+var KILL_SWITCH_URL = "";
+var PERSIST_KEY_PRESETS = "f2v.animPresets.v2";
+var PERSIST_KEY_SETTINGS = "f2v.settings.v1";
 var EXPORT_SCALE = 2;
 
-function defaultAnim() { return { type: "none", start: 0, duration: 0.5, easing: "easeOut", distance: 100 }; }
+function defaultAnim() {
+  return {
+    effects: { fade: false, slide: null, scale: false, textReveal: false },
+    start: 0, duration: 0.5, easing: "easeOut", distance: 100
+  };
+}
+// Migrate an old-shape preset {type:"fadeIn",...} to the new combinable shape.
+function migrateAnim(a) {
+  if (!a) return defaultAnim();
+  if (a.effects) return a; // already new shape
+  var out = defaultAnim();
+  out.start = a.start != null ? a.start : 0;
+  out.duration = a.duration != null ? a.duration : 0.5;
+  out.easing = a.easing || "easeOut";
+  out.distance = a.distance != null ? a.distance : 100;
+  switch (a.type) {
+    case "fadeIn": out.effects.fade = true; break;
+    case "slideLeft": out.effects.fade = true; out.effects.slide = "left"; break;
+    case "slideRight": out.effects.fade = true; out.effects.slide = "right"; break;
+    case "slideUp": out.effects.fade = true; out.effects.slide = "up"; break;
+    case "slideDown": out.effects.fade = true; out.effects.slide = "down"; break;
+    case "scaleIn": out.effects.fade = true; out.effects.scale = true; break;
+    case "textReveal": out.effects.textReveal = true; break;
+    case "none": default: break;
+  }
+  return out;
+}
+function hasAnyEffect(a) { var e = a.effects; return !!(e && (e.fade || e.slide || e.scale || e.textReveal)); }
 function normalizeName(n) { return (n || "").toLowerCase().replace(/\s+/g, ""); }
 function detectKeyArtSlot(name) {
   var m = normalizeName(name).match(/^keyart(\d+)$/);
@@ -385,7 +487,9 @@ function animKey(el, lineIndex) {
   return el.normalizedName + (lineIndex != null ? "__line" + lineIndex : "");
 }
 function getAnimFor(el, lineIndex) {
-  return (el && state.animPresets[animKey(el, lineIndex)]) || defaultAnim();
+  if (!el) return defaultAnim();
+  var raw = state.animPresets[animKey(el, lineIndex)];
+  return raw ? migrateAnim(raw) : defaultAnim();
 }
 
 // ── EASING ──
@@ -467,39 +571,49 @@ function drawElement(c, el, t) {
   drawSingle(c, el, null, t);
 }
 
+// Compute composite animation transform from combinable effects at time t.
+// Returns { opacity, offsetX, offsetY, scaleVal, clipFrac, p } where any unused effect is identity.
+function computeAnimTransform(a, t) {
+  var out = { opacity: 1, offsetX: 0, offsetY: 0, scaleVal: 1, clipFrac: 1, p: 1 };
+  if (!hasAnyEffect(a)) return out;
+  var p = getAnimProgress(t, a.start, a.duration, a.easing);
+  out.p = p;
+  var e = a.effects;
+  if (e.fade) out.opacity = p;
+  if (e.slide === "left") out.offsetX = -a.distance * (1 - p);
+  else if (e.slide === "right") out.offsetX = a.distance * (1 - p);
+  else if (e.slide === "up") out.offsetY = a.distance * (1 - p);
+  else if (e.slide === "down") out.offsetY = -a.distance * (1 - p);
+  if (e.scale) out.scaleVal = 0.3 + 0.7 * p;
+  if (e.textReveal) out.clipFrac = p;
+  return out;
+}
+
 function drawSingle(c, el, lineIndex, t) {
   var a = getAnimFor(el, lineIndex);
-  var opacity = 1, offsetX = 0, offsetY = 0, scaleVal = 1, clipFrac = 1;
-  if (a.type !== "none") {
-    var p = getAnimProgress(t, a.start, a.duration, a.easing);
-    switch (a.type) {
-      case "fadeIn": opacity = p; break;
-      case "slideLeft": offsetX = -a.distance * (1 - p); opacity = p; break;
-      case "slideRight": offsetX = a.distance * (1 - p); opacity = p; break;
-      case "slideUp": offsetY = a.distance * (1 - p); opacity = p; break;
-      case "slideDown": offsetY = -a.distance * (1 - p); opacity = p; break;
-      case "scaleIn": scaleVal = 0.3 + 0.7 * p; opacity = p; break;
-      case "textReveal": clipFrac = p; break;
-    }
-  }
-  if (opacity <= 0 && a.type !== "textReveal") return;
+  var tr = computeAnimTransform(a, t);
+  if (tr.opacity <= 0 && !(a.effects && a.effects.textReveal)) return;
 
   c.save();
-  c.globalAlpha = Math.max(0, Math.min(1, opacity));
+  c.globalAlpha = Math.max(0, Math.min(1, tr.opacity));
 
   var dw = el.renderW, dh = el.renderH;
-  var dx = el.x + offsetX, dy = el.y + offsetY;
+  var dx = el.x + tr.offsetX, dy = el.y + tr.offsetY;
 
-  if (scaleVal !== 1) {
+  if (tr.scaleVal !== 1) {
     var cx = dx + dw / 2, cy = dy + dh / 2;
-    c.translate(cx, cy); c.scale(scaleVal, scaleVal); c.translate(-cx, -cy);
+    c.translate(cx, cy); c.scale(tr.scaleVal, tr.scaleVal); c.translate(-cx, -cy);
   }
-  if (a.type === "textReveal" && clipFrac < 1) {
-    c.beginPath(); c.rect(dx, dy, dw * clipFrac, dh); c.clip();
+  if (a.effects && a.effects.textReveal && tr.clipFrac < 1) {
+    c.beginPath(); c.rect(dx, dy, dw * tr.clipFrac, dh); c.clip();
   }
 
+  // Per-instance video (overrides static) — render the video cover-fit into the element's rect.
+  var ev = state.elementVideos[el.id];
   var kv = el.keyArtSlot ? state.keyArtVideos[el.keyArtSlot] : null;
-  if (kv && kv.video && kv.video.readyState >= 2) {
+  if (ev && ev.video && ev.video.readyState >= 2) {
+    drawCoverInto(c, ev.video, dx, dy, dw, dh);
+  } else if (kv && kv.video && kv.video.readyState >= 2) {
     c.save();
     c.globalAlpha *= (kv.opacity != null ? kv.opacity : 1);
     drawCoverInto(c, kv.video, dx, dy, dw, dh);
@@ -514,25 +628,13 @@ function drawSingle(c, el, lineIndex, t) {
 // positioned at (el.y + i * bandHeight) with its own animation preset applied.
 function drawTextLine(c, el, i, t) {
   var a = getAnimFor(el, i);
-  var opacity = 1, offsetX = 0, offsetY = 0, scaleVal = 1, clipFrac = 1;
-  if (a.type !== "none") {
-    var p = getAnimProgress(t, a.start, a.duration, a.easing);
-    switch (a.type) {
-      case "fadeIn": opacity = p; break;
-      case "slideLeft": offsetX = -a.distance * (1 - p); opacity = p; break;
-      case "slideRight": offsetX = a.distance * (1 - p); opacity = p; break;
-      case "slideUp": offsetY = a.distance * (1 - p); opacity = p; break;
-      case "slideDown": offsetY = -a.distance * (1 - p); opacity = p; break;
-      case "scaleIn": scaleVal = 0.3 + 0.7 * p; opacity = p; break;
-      case "textReveal": clipFrac = p; break;
-    }
-  }
-  if (opacity <= 0 && a.type !== "textReveal") return;
+  var tr = computeAnimTransform(a, t);
+  if (tr.opacity <= 0 && !(a.effects && a.effects.textReveal)) return;
 
   var dw = el.renderW;
   var dh = el.bandHeight;
-  var dx = el.x + offsetX;
-  var dy = el.y + i * el.bandHeight + offsetY;
+  var dx = el.x + tr.offsetX;
+  var dy = el.y + i * el.bandHeight + tr.offsetY;
 
   // Source band on the PNG, at EXPORT_SCALE resolution.
   var sy = Math.round(i * el.bandHeight * EXPORT_SCALE);
@@ -540,13 +642,13 @@ function drawTextLine(c, el, i, t) {
   var sw = el.img.naturalWidth;
 
   c.save();
-  c.globalAlpha = Math.max(0, Math.min(1, opacity));
-  if (scaleVal !== 1) {
+  c.globalAlpha = Math.max(0, Math.min(1, tr.opacity));
+  if (tr.scaleVal !== 1) {
     var cx = dx + dw / 2, cy = dy + dh / 2;
-    c.translate(cx, cy); c.scale(scaleVal, scaleVal); c.translate(-cx, -cy);
+    c.translate(cx, cy); c.scale(tr.scaleVal, tr.scaleVal); c.translate(-cx, -cy);
   }
-  if (a.type === "textReveal" && clipFrac < 1) {
-    c.beginPath(); c.rect(dx, dy, dw * clipFrac, dh); c.clip();
+  if (a.effects && a.effects.textReveal && tr.clipFrac < 1) {
+    c.beginPath(); c.rect(dx, dy, dw * tr.clipFrac, dh); c.clip();
   }
   c.drawImage(el.img, 0, sy, sw, sh, dx, dy, dw, dh);
   c.restore();
@@ -731,7 +833,7 @@ function selectFrame(index) {
   $("elementList").innerHTML = "";
   var f = state.frames[index];
   for (var i = 0; i < f.elements.length; i++) addElementToList(f.elements[i], i);
-  $("animConfig").style.display = "none";
+  showAnimEmpty();
   setupCanvas();
   renderFrame(state.currentTime);
 }
@@ -798,28 +900,73 @@ function selectElement(index, lineIndex) {
     var ln = parseInt(items[i].dataset.line, 10);
     if (idx === index && ln === (lineIndex == null ? -1 : lineIndex)) items[i].classList.add("selected");
   }
-  var f = currentFrame(); if (!f) { $("animConfig").style.display = "none"; return; }
+  var f = currentFrame(); if (!f) { showAnimEmpty(); return; }
   var el = f.elements[index];
-  if (!el) { $("animConfig").style.display = "none"; return; }
+  if (!el) { showAnimEmpty(); return; }
   var a = getAnimFor(el, state.selectedLineIndex);
+  $("animEmpty").style.display = "none";
   $("animConfig").style.display = "block";
-  var title = "Animate: " + el.name;
+  var title = el.name;
   if (state.selectedLineIndex != null) title += " · Line " + (state.selectedLineIndex + 1);
   if (el.keyArtSlot) title += "  (" + el.keyArtSlot + ")";
   $("animTitle").textContent = title;
-  $("animType").value = a.type;
+  $("animFade").checked = !!a.effects.fade;
+  $("animScale").checked = !!a.effects.scale;
+  $("animTextReveal").checked = !!a.effects.textReveal;
+  $("animSlide").value = a.effects.slide || "";
   $("animEasing").value = a.easing;
   $("animStart").value = a.start;
   $("animDuration").value = a.duration;
   $("animDistance").value = a.distance;
+
+  // Per-instance video section reflects current state for this element.
+  refreshElementVideoUI(el);
+}
+
+function showAnimEmpty() {
+  $("animEmpty").style.display = "block";
+  $("animConfig").style.display = "none";
+}
+
+function refreshElementVideoUI(el) {
+  var ev = state.elementVideos[el.id];
+  var drop = $("dropElementVideo");
+  drop.classList.toggle("has-file", !!(ev && ev.file));
+  drop.childNodes.forEach && drop.childNodes.forEach(function() {});
+  // Rebuild drop zone inner content (preserve input element).
+  var labelText = ev && ev.file ? ev.file.name : "Click or drop video";
+  // Keep the file input intact; only update visible label text via a dedicated span.
+  var span = drop.querySelector(".drop-label");
+  if (!span) {
+    span = document.createElement("span");
+    span.className = "drop-label";
+    drop.appendChild(span);
+  }
+  span.textContent = labelText;
+  $("btnRemoveElementVideo").style.display = (ev && ev.video) ? "inline-block" : "none";
+  $("chkElVideoLoop").checked = ev ? (ev.loop !== false) : true;
+}
+
+// Build a short label from active effects for the badge.
+function animBadgeLabel(a) {
+  if (!hasAnyEffect(a)) return "";
+  var parts = [];
+  if (a.effects.fade) parts.push("fade");
+  if (a.effects.slide) parts.push("slide " + a.effects.slide);
+  if (a.effects.scale) parts.push("scale");
+  if (a.effects.textReveal) parts.push("reveal");
+  return parts.join("+");
 }
 
 function refreshBadgesForItem(itemEl, el, lineIndex) {
   var existing = itemEl.querySelector(".el-anim-badge[data-anim='1']"); if (existing) existing.remove();
-  var a = state.animPresets[animKey(el, lineIndex)];
-  if (a && a.type !== "none") {
+  var raw = state.animPresets[animKey(el, lineIndex)];
+  if (!raw) return;
+  var a = migrateAnim(raw);
+  var label = animBadgeLabel(a);
+  if (label) {
     var badge = document.createElement("span");
-    badge.className = "el-anim-badge"; badge.setAttribute("data-anim", "1"); badge.textContent = a.type;
+    badge.className = "el-anim-badge"; badge.setAttribute("data-anim", "1"); badge.textContent = label;
     itemEl.querySelector(".el-name").appendChild(badge);
   }
 }
@@ -835,19 +982,28 @@ function refreshBadges() {
   }
 }
 
-function applyAnimToElement(index, lineIndex) {
-  var f = currentFrame(); if (!f) return;
-  var el = f.elements[index]; if (!el) return;
-  state.animPresets[animKey(el, lineIndex)] = {
-    type: $("animType").value,
+function readAnimFromUI() {
+  return {
+    effects: {
+      fade: $("animFade").checked,
+      slide: $("animSlide").value || null,
+      scale: $("animScale").checked,
+      textReveal: $("animTextReveal").checked
+    },
     easing: $("animEasing").value,
     start: parseFloat($("animStart").value) || 0,
     duration: parseFloat($("animDuration").value) || 0.5,
     distance: parseFloat($("animDistance").value) || 100
   };
+}
+function applyAnimToElement(index, lineIndex) {
+  var f = currentFrame(); if (!f) return;
+  var el = f.elements[index]; if (!el) return;
+  state.animPresets[animKey(el, lineIndex)] = readAnimFromUI();
+  persistPresets();
   refreshBadges(); renderFrame(state.currentTime);
   var label = el.name + (lineIndex != null ? " · Line " + (lineIndex + 1) : "");
-  log("Applied " + state.animPresets[animKey(el, lineIndex)].type + " to '" + label + "' (across set)");
+  log("Applied " + (animBadgeLabel(state.animPresets[animKey(el, lineIndex)]) || "(no effects)") + " to '" + label + "'");
 }
 
 // ── PLAYBACK ──
@@ -887,6 +1043,11 @@ function startPlayback() {
     kv.video.currentTime = (kv.loop !== false && vdur) ? (state.currentTime % vdur) : Math.min(state.currentTime, vdur || state.currentTime);
     kv.video.play().catch(function(){});
   });
+  forEachElementVideo(function(ev) {
+    var vdur = ev.video.duration || 0;
+    ev.video.currentTime = (ev.loop !== false && vdur) ? (state.currentTime % vdur) : Math.min(state.currentTime, vdur || state.currentTime);
+    ev.video.play().catch(function(){});
+  });
   playLoop();
 }
 function stopPlayback() {
@@ -897,10 +1058,12 @@ function stopPlayback() {
   if (state.bgVideo) state.bgVideo.pause();
   if (state.bgAudio) state.bgAudio.pause();
   forEachKeyArtVideo(function(kv) { kv.video.pause(); });
+  forEachElementVideo(function(ev) { ev.video.pause(); });
 }
 function resetPlayback() {
   stopPlayback(); state.currentTime = 0; updateTimeUI();
   forEachKeyArtVideo(function(kv) { kv.video.currentTime = 0; });
+  forEachElementVideo(function(ev) { ev.video.currentTime = 0; });
   renderFrame(0);
 }
 function playLoop() {
@@ -914,6 +1077,7 @@ function playLoop() {
       if (state.bgVideo) state.bgVideo.currentTime = 0;
       if (state.bgAudio) state.bgAudio.currentTime = 0;
       forEachKeyArtVideo(function(kv) { kv.video.currentTime = 0; });
+      forEachElementVideo(function(ev) { ev.video.currentTime = 0; });
     } else {
       state.currentTime = dur; renderFrame(state.currentTime); updateTimeUI(); stopPlayback(); return;
     }
@@ -1020,6 +1184,7 @@ function rebuildKeyArtSlotsPanel() {
 }
 
 function loadKeyArtVideo(slot, file) {
+  if (looksLikeMov(file)) { showMovToast(file); return; }
   var url = URL.createObjectURL(file);
   var v = document.createElement("video");
   var prev = state.keyArtVideos[slot] || {};
@@ -1039,6 +1204,7 @@ function loadKeyArtVideo(slot, file) {
   v.load();
 }
 function loadVideo(file) {
+  if (looksLikeMov(file)) { showMovToast(file); return; }
   var url = URL.createObjectURL(file);
   var v = document.createElement("video");
   v.src = url; v.muted = true; v.loop = $("chkVideoLoop").checked; v.playsInline = true; v.preload = "auto";
@@ -1124,6 +1290,7 @@ async function exportVariant(frame, variantIndex, variantTotal, mimeType, bitrat
   if (state.bgVideo) { try { state.bgVideo.currentTime = 0; state.bgVideo.play().catch(function(){}); } catch (e) {} }
   var kvs = keyArtVideosArr();
   kvs.forEach(function(kv) { if (kv.video) { try { kv.video.currentTime = 0; kv.video.play().catch(function(){}); } catch (e) {} } });
+  forEachElementVideo(function(ev) { try { ev.video.currentTime = 0; ev.video.play().catch(function(){}); } catch (e) {} });
   recorder.start();
 
   var sx = expW / frame.width, sy = expH / frame.height;
@@ -1155,6 +1322,7 @@ async function exportVariant(frame, variantIndex, variantTotal, mimeType, bitrat
   // Pause video sources so they don't keep playing after export.
   if (state.bgVideo) try { state.bgVideo.pause(); } catch (e) {}
   kvs.forEach(function(kv) { if (kv.video) try { kv.video.pause(); } catch (e) {} });
+  forEachElementVideo(function(ev) { try { ev.video.pause(); } catch (e) {} });
 
   recorder.stop(); await done;
   if (audioCtx) try { audioCtx.close(); } catch (e) {}
@@ -1231,16 +1399,16 @@ $("btnPlay").addEventListener("click", function() { if (state.playing) stopPlayb
 $("btnStop").addEventListener("click", resetPlayback);
 $("btnLoop").addEventListener("click", function() {
   state.looping = !state.looping; this.classList.toggle("active", state.looping);
+  persistSettings();
   log("Loop: " + (state.looping ? "ON" : "OFF"));
 });
 $("btnApplyAnim").addEventListener("click", function() {
   if (state.selectedElementIndex >= 0) applyAnimToElement(state.selectedElementIndex, state.selectedLineIndex);
 });
 $("btnApplyAll").addEventListener("click", function() {
-  // Apply to every distinct preset slot across the set (each multi-line text contributes N slots), stagger.
-  var type = $("animType").value, easing = $("animEasing").value;
-  var dur = parseFloat($("animDuration").value) || 0.5;
-  var dist = parseFloat($("animDistance").value) || 100;
+  // Apply the current UI effect config to every distinct preset slot across the set,
+  // stagger start times by 0.15s.
+  var base = readAnimFromUI();
   var seen = {}, order = [];
   for (var fi = 0; fi < state.frames.length; fi++) {
     var els = state.frames[fi].elements;
@@ -1259,11 +1427,13 @@ $("btnApplyAll").addEventListener("click", function() {
   }
   for (var k2 = 0; k2 < order.length; k2++) {
     state.animPresets[order[k2]] = {
-      type: type, easing: easing, duration: dur, distance: dist, start: k2 * 0.15
+      effects: { fade: base.effects.fade, slide: base.effects.slide, scale: base.effects.scale, textReveal: base.effects.textReveal },
+      easing: base.easing, duration: base.duration, distance: base.distance, start: k2 * 0.15
     };
   }
+  persistPresets();
   refreshBadges(); renderFrame(state.currentTime);
-  log("Applied " + type + " to all (" + order.length + " slots)");
+  log("Applied " + (animBadgeLabel(base) || "(no effects)") + " to all (" + order.length + " slots)");
 });
 $("btnClearAnim").addEventListener("click", function() {
   var f = currentFrame();
@@ -1271,7 +1441,11 @@ $("btnClearAnim").addEventListener("click", function() {
     var el = f.elements[state.selectedElementIndex];
     if (el) {
       delete state.animPresets[animKey(el, state.selectedLineIndex)];
-      $("animType").value = "none";
+      persistPresets();
+      $("animFade").checked = false;
+      $("animScale").checked = false;
+      $("animTextReveal").checked = false;
+      $("animSlide").value = "";
       refreshBadges(); renderFrame(state.currentTime);
     }
   }
@@ -1292,6 +1466,10 @@ $("timelineTrack").addEventListener("click", function(e) {
   forEachKeyArtVideo(function(kv) {
     var vdur = kv.video.duration || 0;
     kv.video.currentTime = (kv.loop !== false && vdur) ? (state.currentTime % vdur) : Math.min(state.currentTime, vdur || state.currentTime);
+  });
+  forEachElementVideo(function(ev) {
+    var vdur = ev.video.duration || 0;
+    ev.video.currentTime = (ev.loop !== false && vdur) ? (state.currentTime % vdur) : Math.min(state.currentTime, vdur || state.currentTime);
   });
   // If already playing, realign the wall-clock anchor so playback continues smoothly from the scrubbed position.
   if (state.playing) { state.playStartWall = performance.now(); state.playStartTime = state.currentTime; }
@@ -1327,7 +1505,171 @@ if (typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported("video
   log("MP4 supported!");
 } else { log("WebM fallback"); }
 
+// ── PERSISTENCE ──
+function persistPresets() {
+  try { localStorage.setItem(PERSIST_KEY_PRESETS, JSON.stringify(state.animPresets)); } catch (e) {}
+}
+function persistSettings() {
+  try {
+    var s = {
+      duration: $("videoDuration").value,
+      fps: $("videoFps").value,
+      resolution: $("videoResolution").value,
+      bitrate: $("exportBitrate").value,
+      targetMB: $("exportTargetMB").value,
+      qualityMode: $("qualityMode").value,
+      videoOpacity: $("videoOpacity").value,
+      audioVolume: $("audioVolume").value,
+      chkVideoLoop: $("chkVideoLoop").checked,
+      looping: state.looping
+    };
+    localStorage.setItem(PERSIST_KEY_SETTINGS, JSON.stringify(s));
+  } catch (e) {}
+}
+function loadPersisted() {
+  try {
+    var p = localStorage.getItem(PERSIST_KEY_PRESETS);
+    if (p) {
+      var parsed = JSON.parse(p);
+      // Migrate any old-shape entries on the fly.
+      Object.keys(parsed).forEach(function(k) { parsed[k] = migrateAnim(parsed[k]); });
+      state.animPresets = parsed;
+      log("Loaded " + Object.keys(parsed).length + " saved animation preset(s).");
+    }
+  } catch (e) { log("Preset load failed: " + e.message, "warn"); }
+  try {
+    var s = localStorage.getItem(PERSIST_KEY_SETTINGS);
+    if (s) {
+      var obj = JSON.parse(s);
+      if (obj.duration != null) $("videoDuration").value = obj.duration;
+      if (obj.fps != null) $("videoFps").value = obj.fps;
+      if (obj.resolution != null) $("videoResolution").value = obj.resolution;
+      if (obj.bitrate != null) $("exportBitrate").value = obj.bitrate;
+      if (obj.targetMB != null) $("exportTargetMB").value = obj.targetMB;
+      if (obj.qualityMode != null) {
+        $("qualityMode").value = obj.qualityMode;
+        var isSize = obj.qualityMode === "size";
+        $("fieldBitrate").style.display = isSize ? "none" : "";
+        $("fieldTargetSize").style.display = isSize ? "" : "none";
+      }
+      if (obj.videoOpacity != null) { $("videoOpacity").value = obj.videoOpacity; state.bgVideoOpacity = parseFloat(obj.videoOpacity); }
+      if (obj.audioVolume != null) { $("audioVolume").value = obj.audioVolume; state.bgAudioVolume = parseFloat(obj.audioVolume); }
+      if (obj.chkVideoLoop != null) { $("chkVideoLoop").checked = !!obj.chkVideoLoop; state.bgVideoLoop = !!obj.chkVideoLoop; }
+      if (obj.looping != null) { state.looping = !!obj.looping; $("btnLoop").classList.toggle("active", state.looping); }
+      log("Restored saved settings.");
+    }
+  } catch (e) { log("Settings load failed: " + e.message, "warn"); }
+}
+// Save settings on any change to the right-panel inputs.
+["videoDuration","videoFps","videoResolution","exportBitrate","exportTargetMB","qualityMode","videoOpacity","audioVolume","chkVideoLoop"].forEach(function(id) {
+  var el = $(id); if (!el) return;
+  el.addEventListener("change", persistSettings);
+  el.addEventListener("input", persistSettings);
+});
+
+// ── MOV / QUICKTIME DETECTION ──
+function looksLikeMov(file) {
+  if (!file) return false;
+  var name = (file.name || "").toLowerCase();
+  if (name.endsWith(".mov") || name.endsWith(".qt")) return true;
+  if ((file.type || "").toLowerCase().indexOf("quicktime") !== -1) return true;
+  return false;
+}
+function showMovToast(file) {
+  var existing = document.querySelector(".toast[data-mov]"); if (existing) existing.remove();
+  var t = document.createElement("div");
+  t.className = "toast err"; t.setAttribute("data-mov", "1");
+  t.innerHTML = '<span class="toast-close" title="Dismiss">&times;</span>' +
+    '<strong>Can\'t load ' + (file.name || "MOV file") + '</strong><br>' +
+    "Chromium can't decode ProRes / 4444 MOV. Convert to WebM with VP9 + alpha and re-drop:" +
+    '<code>ffmpeg -i "' + (file.name || "input.mov") + '" -c:v libvpx-vp9 -pix_fmt yuva420p -b:v 4M -auto-alt-ref 0 "' +
+    (file.name ? file.name.replace(/\.(mov|qt)$/i, "") : "output") + '.webm"</code>';
+  document.querySelector(".canvas-area").appendChild(t);
+  t.querySelector(".toast-close").addEventListener("click", function() { t.remove(); });
+  setTimeout(function() { if (t.parentNode) t.remove(); }, 20000);
+}
+
+// ── ELEMENT VIDEO (per-instance replacement) ──
+function loadElementVideo(elementId, file) {
+  if (looksLikeMov(file)) { showMovToast(file); return; }
+  var url = URL.createObjectURL(file);
+  var v = document.createElement("video");
+  var prev = state.elementVideos[elementId] || {};
+  v.src = url; v.muted = true;
+  v.loop = prev.loop !== false;
+  v.playsInline = true; v.preload = "auto";
+  v.addEventListener("loadeddata", function() {
+    state.elementVideos[elementId] = { file: file, video: v, loop: prev.loop !== false };
+    log("Element video loaded for id " + elementId + ": " + file.name);
+    var f = currentFrame();
+    if (f && state.selectedElementIndex >= 0) {
+      var el = f.elements[state.selectedElementIndex];
+      if (el && el.id === elementId) refreshElementVideoUI(el);
+    }
+    renderFrame(state.currentTime);
+  });
+  v.addEventListener("error", function() { log("Failed to decode video. May be ProRes/MOV — see toast.", "err"); showMovToast(file); });
+  v.load();
+}
+function removeElementVideo(elementId) {
+  var ev = state.elementVideos[elementId];
+  if (ev && ev.video) { try { ev.video.pause(); } catch (e) {} }
+  delete state.elementVideos[elementId];
+  var f = currentFrame();
+  if (f && state.selectedElementIndex >= 0) {
+    var el = f.elements[state.selectedElementIndex];
+    if (el && el.id === elementId) refreshElementVideoUI(el);
+  }
+  renderFrame(state.currentTime);
+}
+function forEachElementVideo(fn) {
+  Object.keys(state.elementVideos).forEach(function(id) {
+    var ev = state.elementVideos[id];
+    if (ev && ev.video) { try { fn(ev); } catch (e) {} }
+  });
+}
+
+// Wire element-video drop zone + controls.
+setupFileDrop("dropElementVideo", "inputElementVideo", function(file) {
+  var f = currentFrame(); if (!f || state.selectedElementIndex < 0) { log("Select an element first.", "warn"); return; }
+  loadElementVideo(f.elements[state.selectedElementIndex].id, file);
+});
+$("btnRemoveElementVideo").addEventListener("click", function() {
+  var f = currentFrame(); if (!f || state.selectedElementIndex < 0) return;
+  removeElementVideo(f.elements[state.selectedElementIndex].id);
+});
+$("chkElVideoLoop").addEventListener("change", function() {
+  var f = currentFrame(); if (!f || state.selectedElementIndex < 0) return;
+  var ev = state.elementVideos[f.elements[state.selectedElementIndex].id];
+  if (ev) { ev.loop = this.checked; if (ev.video) ev.video.loop = this.checked; }
+});
+
+// ── KILL SWITCH ──
+// Fail-open on any error (offline, network blocked, malformed response).
+function checkKillSwitch() {
+  if (!KILL_SWITCH_URL) return;
+  fetch(KILL_SWITCH_URL, { cache: "no-store" })
+    .then(function(r) { return r.json(); })
+    .then(function(j) {
+      if (j && j.disabled === true) showDisabledScreen(j.message || "This plugin has been disabled by the maintainer.");
+    })
+    .catch(function() { /* offline / blocked — fail open */ });
+}
+function showDisabledScreen(msg) {
+  state.disabled = true;
+  stopPlayback();
+  var scr = document.createElement("div");
+  scr.className = "disabled-screen";
+  scr.innerHTML = "<h1>Plugin disabled</h1><p>" + msg.replace(/</g, "&lt;") + "</p>";
+  document.body.appendChild(scr);
+  $("btnExport").disabled = true;
+  $("btnLoadFrame").disabled = true;
+  log("Plugin disabled remotely: " + msg, "err");
+}
+
 updateTimeUI();
+loadPersisted();
+checkKillSwitch();
 log("UI ready.");
 </script>
 </body>

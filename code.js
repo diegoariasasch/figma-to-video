@@ -1,7 +1,7 @@
 // Frame to Video — Figma Main Thread
 // Supports a single frame OR a Section containing many sibling frames as "variants".
 
-figma.showUI(__html__, { width: 1000, height: 700, themeColors: true });
+figma.showUI(__html__, { width: 1200, height: 720, themeColors: true });
 
 var FRAME_TYPES = ["FRAME", "COMPONENT", "INSTANCE", "GROUP"];
 
