@@ -6,6 +6,10 @@
   "ui": "ui.html",
   "editorType": ["figma"],
   "networkAccess": {
-    "allowedDomains": ["none"]
+    "allowedDomains": [
+      "https://gist.githubusercontent.com",
+      "https://raw.githubusercontent.com"
+    ],
+    "reasoning": "Kill-switch check: plugin fetches a small JSON status file the maintainer hosts on GitHub (gist or repo). If the file sets disabled=true, the plugin refuses to run. Fetch fails open on offline."
   }
 }
