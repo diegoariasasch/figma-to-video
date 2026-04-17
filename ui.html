@@ -314,12 +314,13 @@
             <div class="file-drop" id="dropElementVideo" style="padding:8px; font-size:10px;">
               <input type="file" id="inputElementVideo" accept="video/*">Click or drop video
             </div>
-            <div style="margin-top:4px; display:flex; gap:6px; align-items:center;">
+            <div style="margin-top:4px; display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
               <label style="font-size:10px;"><input type="checkbox" id="chkElVideoLoop" checked> Loop</label>
+              <label style="font-size:10px;" title="Preserve transparency. VP9 alpha WebM + frame cache — best for logos / badges."><input type="checkbox" id="chkElVideoAlpha" checked> Transparent</label>
               <button class="btn-secondary" id="btnRemoveElementVideo" style="flex:1; font-size:10px; display:none;">Remove video</button>
             </div>
             <div style="font-size:10px; color:var(--text-secondary); margin-top:4px; line-height:1.4;">
-              Replaces this specific element with a video (keeps position and size). Useful for animated logos, badges, etc.
+              Replaces this specific element with a video (keeps position and size). Keep <b>Transparent</b> on for animated logos or badges; turn it off for an element that fills its whole rect (H.264 MP4, hardware-decoded, smoother).
             </div>
           </div>
         </div>
@@ -367,7 +368,10 @@
       <div class="section">
         <h3>Background Video</h3>
         <div class="file-drop" id="dropVideo"><input type="file" id="inputVideo" accept="video/*">Click or drop video</div>
-        <div style="margin-top:4px;"><label><input type="checkbox" id="chkVideoLoop" checked> Loop</label></div>
+        <div style="margin-top:4px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+          <label><input type="checkbox" id="chkVideoLoop" checked> Loop</label>
+          <label title="Preserve transparency. Only needed if the background is layered — usually leave off for smooth hardware-decoded H.264 playback."><input type="checkbox" id="chkVideoAlpha"> Transparent</label>
+        </div>
         <div class="field" style="margin-top:4px;"><label>Opacity</label><input type="range" id="videoOpacity" min="0" max="1" step="0.05" value="1"></div>
         <button class="btn-secondary" id="btnRemoveVideo" style="width:100%; margin-top:4px; display:none;">Remove Video</button>
       </div>
@@ -425,8 +429,9 @@ var state = {
   selectedElementIndex: -1,
   selectedLineIndex: null,
   animPresets: {},               // { key: { effects: {fade,slide,scale,textReveal}, start, duration, easing, distance } }
-  keyArtVideos: {},              // { slotKey: { file, video, loop, opacity } }
-  elementVideos: {},             // { elementId: { file, video, loop } } — per-instance replacement
+  keyArtVideos: {},              // { slotKey: { file, video, loop, opacity, frames?, fps?, alpha? } }
+  keyArtAlphaPrefs: {},          // { slotKey: bool } — persists the Transparent checkbox state across re-drops
+  elementVideos: {},             // { nameKey: { file, video, loop, frames?, fps?, alpha? } } — per-instance replacement
   currentTime: 0, duration: 6,
   playing: false, looping: false,
   playRafId: null, playStartWall: 0, playStartTime: 0,
@@ -1230,6 +1235,15 @@ function rebuildKeyArtSlotsPanel() {
     var loopLbl = document.createElement("label");
     loopLbl.innerHTML = '<input type="checkbox" ' + ((existing && existing.loop !== false) ? "checked" : "") + '> Loop';
     controls.appendChild(loopLbl);
+    // Transparent toggle — default OFF for key art slots (users usually drop a
+    // full-canvas video here; H.264 MP4 is hardware-decoded so it plays smooth
+    // at native resolution with no bitmap cache). Turn ON only when this slot's
+    // video needs to composite with transparency.
+    var alphaLbl = document.createElement("label");
+    alphaLbl.title = "Preserve transparency. VP9 alpha WebM + frame cache — use for logo / badge slots. Off = H.264 MP4, hardware-decoded.";
+    var alphaChecked = !!(existing && existing.alpha) || !!state.keyArtAlphaPrefs[slot];
+    alphaLbl.innerHTML = '<input type="checkbox" ' + (alphaChecked ? "checked" : "") + '> Transparent';
+    controls.appendChild(alphaLbl);
     var removeBtn = document.createElement("button");
     removeBtn.className = "btn-secondary"; removeBtn.textContent = "Remove";
     removeBtn.style.fontSize = "10px"; removeBtn.style.padding = "3px 8px";
@@ -1253,6 +1267,16 @@ function rebuildKeyArtSlotsPanel() {
       var kv = state.keyArtVideos[slot];
       if (kv) { kv.loop = this.checked; if (kv.video) kv.video.loop = this.checked; }
       else state.keyArtVideos[slot] = { loop: this.checked, opacity: parseFloat(opacityInput.value) || 1 };
+    });
+    alphaLbl.querySelector("input").addEventListener("change", function() {
+      // Store the preference before any video is dropped so a fresh drop picks
+      // it up. If a video is already loaded in this slot, warn the user that
+      // they need to re-drop to change the codec.
+      state.keyArtAlphaPrefs[slot] = this.checked;
+      var kv = state.keyArtVideos[slot];
+      if (kv && kv.video) {
+        log("Re-drop the video on slot '" + slot + "' to re-convert with the new transparency setting.", "warn");
+      }
     });
     opacityInput.addEventListener("input", function() {
       var kv = state.keyArtVideos[slot] || (state.keyArtVideos[slot] = { loop: true, opacity: 1 });
@@ -1301,12 +1325,17 @@ function releaseEntryFrames(entry) {
 }
 
 async function loadKeyArtVideo(slot, file) {
-  // Pick a bitmap size that's big enough for every element wired to this slot.
+  // Read the per-slot Transparent toggle. Default OFF — key art slots typically
+  // hold a full-canvas hero video that doesn't need alpha, and H.264 MP4 plays
+  // smooth via hardware decode.
+  var alpha = !!state.keyArtAlphaPrefs[slot];
+  // When alpha=true we pre-decode bitmaps sized to the largest element rect
+  // using this slot. For alpha=false (H.264 MP4) destW/H are ignored — the
+  // converter skips the frame extract pass.
   var rect = largestRectForElements(function(el) { return el.keyArtSlot === slot; });
   var fps = parseInt($("videoFps").value) || 24;
-  var result = await coerceToPlayable(file, { destW: rect.w, destH: rect.h, fps: fps });
+  var result = await coerceToPlayable(file, { destW: rect.w, destH: rect.h, fps: fps, alpha: alpha });
   if (!result) return;
-  // Replace any previous entry's bitmaps before overwriting state.
   releaseEntryFrames(state.keyArtVideos[slot]);
   var actualFile = result.file;
   var url = URL.createObjectURL(actualFile);
@@ -1321,19 +1350,26 @@ async function loadKeyArtVideo(slot, file) {
       loop: prev.loop !== false,
       opacity: prev.opacity != null ? prev.opacity : 1,
       frames: result.frames,
-      fps: result.fps
+      fps: result.fps,
+      alpha: result.alpha
     };
-    log("Key Art '" + slot + "' video loaded: " + actualFile.name + " (" + v.videoWidth + "x" + v.videoHeight + ")" +
-        (result.frames ? " [bitmap-backed: " + result.frames.length + " @ " + rect.w + "×" + rect.h + "]" : " [<video> playback]"));
+    var mode = result.alpha
+      ? (result.frames ? "bitmap-backed: " + result.frames.length + " @ " + rect.w + "×" + rect.h : "<video> alpha fallback")
+      : "<video> H.264 (hardware-decoded)";
+    log("Key Art '" + slot + "' video loaded: " + actualFile.name + " (" + v.videoWidth + "x" + v.videoHeight + ") [" + mode + "]");
     rebuildKeyArtSlotsPanel();
     renderFrame(state.currentTime);
   });
   v.load();
 }
 async function loadVideo(file) {
-  // BG video is full-canvas — would always exceed the 200 MB bitmap budget.
-  // Skip frame pre-decode and use <video> playback.
-  var result = await coerceToPlayable(file);
+  // BG video is full-canvas. Default to H.264 MP4 for hardware-decoded smooth
+  // playback; user can opt into alpha via the Transparent checkbox when the
+  // background is layered. Bitmap pre-decode is skipped either way (full-canvas
+  // always blows the budget).
+  var alpha = !!($("chkVideoAlpha") && $("chkVideoAlpha").checked);
+  var fps = parseInt($("videoFps").value) || 24;
+  var result = await coerceToPlayable(file, { fps: fps, alpha: alpha });
   if (!result) return;
   var actualFile = result.file;
   var url = URL.createObjectURL(actualFile);
@@ -1343,7 +1379,7 @@ async function loadVideo(file) {
     state.bgVideo = v;
     $("dropVideo").classList.add("has-file"); $("dropVideo").textContent = actualFile.name;
     $("btnRemoveVideo").style.display = "block"; renderFrame(state.currentTime);
-    log("Video loaded: " + actualFile.name);
+    log("BG video loaded: " + actualFile.name + " [" + (alpha ? "VP9 alpha WebM" : "H.264 MP4 hardware-decoded") + "]");
   });
   v.load();
 }
@@ -1682,6 +1718,8 @@ function persistSettings() {
       videoOpacity: $("videoOpacity").value,
       audioVolume: $("audioVolume").value,
       chkVideoLoop: $("chkVideoLoop").checked,
+      chkVideoAlpha: $("chkVideoAlpha") ? $("chkVideoAlpha").checked : false,
+      chkElVideoAlpha: $("chkElVideoAlpha") ? $("chkElVideoAlpha").checked : true,
       looping: state.looping
     };
     localStorage.setItem(PERSIST_KEY_SETTINGS, JSON.stringify(s));
@@ -1716,13 +1754,15 @@ function loadPersisted() {
       if (obj.videoOpacity != null) { $("videoOpacity").value = obj.videoOpacity; state.bgVideoOpacity = parseFloat(obj.videoOpacity); }
       if (obj.audioVolume != null) { $("audioVolume").value = obj.audioVolume; state.bgAudioVolume = parseFloat(obj.audioVolume); }
       if (obj.chkVideoLoop != null) { $("chkVideoLoop").checked = !!obj.chkVideoLoop; state.bgVideoLoop = !!obj.chkVideoLoop; }
+      if (obj.chkVideoAlpha != null && $("chkVideoAlpha")) $("chkVideoAlpha").checked = !!obj.chkVideoAlpha;
+      if (obj.chkElVideoAlpha != null && $("chkElVideoAlpha")) $("chkElVideoAlpha").checked = !!obj.chkElVideoAlpha;
       if (obj.looping != null) { state.looping = !!obj.looping; $("btnLoop").classList.toggle("active", state.looping); }
       log("Restored saved settings.");
     }
   } catch (e) { log("Settings load failed: " + e.message, "warn"); }
 }
 // Save settings on any change to the right-panel inputs.
-["videoDuration","videoFps","videoResolution","exportBitrate","exportTargetMB","qualityMode","videoOpacity","audioVolume","chkVideoLoop"].forEach(function(id) {
+["videoDuration","videoFps","videoResolution","exportBitrate","exportTargetMB","qualityMode","videoOpacity","audioVolume","chkVideoLoop","chkVideoAlpha","chkElVideoAlpha"].forEach(function(id) {
   var el = $(id); if (!el) return;
   el.addEventListener("change", persistSettings);
   el.addEventListener("input", persistSettings);
@@ -1853,31 +1893,29 @@ function loadFFmpeg(onProgress) {
   });
   return _ffmpegPromise;
 }
-// Convert a MOV/QuickTime file to WebM + VP9 + alpha via ffmpeg.wasm. Resolves to
-// { file, frames, fps } where:
-//   - file: a new File (.webm) playable in <video>
-//   - frames: ImageBitmap[] | null — pre-decoded frames sized to opts.destW/H if
-//     provided AND the total bitmap memory stays under 200 MB. Drawing from a
-//     cached ImageBitmap array bypasses the <video> decoder entirely on the
-//     playback hot path, which is the only way to reliably eliminate the
-//     residual mid-playback stutter inside the Figma plugin sandbox.
-//   - fps: the framerate the bitmaps were sampled at (so the draw code can pick
-//     the right index from playback time t).
+// Convert a video file to a browser-friendly format via ffmpeg.wasm.
 //
-// opts: { destW, destH, fps } — destW/H come from el.renderW/renderH for the
-// element (or the largest renderW/H across same-named elements for slot drops).
-// If opts is omitted, no frames are pre-decoded and only the WebM file is
-// returned (used for BG video which is full-canvas and would blow the budget).
+// Branches on opts.alpha:
+//   alpha=true  → VP9 WebM with yuva420p + pre-decoded ImageBitmap frames (per
+//                 destW/destH in opts). VP9 alpha is SOFTWARE-decoded in Chromium
+//                 (no hardware decoder outputs alpha), so the frame cache is the
+//                 only way to avoid mid-playback stutter. Use this path ONLY when
+//                 the video genuinely composites with transparency (logo, badge
+//                 over a backdrop). Over-budget fallback: <video> playback.
+//   alpha=false → H.264 MP4 with yuv420p, NO frame cache. H.264 is hardware
+//                 accelerated on every Chromium platform (VideoToolbox / DXVA /
+//                 VA-API) so <video> playback is smooth at full resolution with
+//                 zero memory cost. Use this for full-canvas key art, BG video,
+//                 and any other "paint the whole rect" case.
 //
-// Encoding args are tuned for SMOOTH real-time playback inside a <video> element
-// (relevant whenever frames is null and we fall back to <video> playback).
-async function convertMovToWebm(file, toast, opts) {
+// Returns { file, frames, fps, alpha }.
+async function convertVideo(file, toast, opts) {
+  opts = opts || {};
+  var alpha = !!opts.alpha;
   var ff = await loadFFmpeg(function(msg) { if (toast) toast.update("<strong>" + file.name + "</strong><br>" + msg); });
 
-  // Wire a progress parser to ffmpeg's stderr — libvpx emits lines like
-  // "frame= 120 fps=24 q=0.0 size= ... time=00:00:05.00 bitrate= ..." during
-  // encode. Extracting time= gives us a live % against the source duration.
-  // Source duration is also emitted up front as "Duration: 00:00:06.00 ..."
+  // ffmpeg progress parser — emits "Duration: …" up front and "time=HH:MM:SS.mm"
+  // per pass. We use this to show % in the toast.
   var srcDur = 0;
   var stage = "encode"; // "encode" | "frames"
   var logHandler = function(e) {
@@ -1888,83 +1926,98 @@ async function convertMovToWebm(file, toast, opts) {
     if (tm && toast && srcDur > 0) {
       var t = (+tm[1]) * 3600 + (+tm[2]) * 60 + parseFloat(tm[3]);
       var pct = Math.min(99, Math.round(t / srcDur * 100));
-      var label = stage === "encode" ? "Converting to WebM + VP9 alpha…" : "Extracting frames…";
+      var codec = alpha ? "VP9 alpha WebM" : "H.264 MP4";
+      var label = stage === "encode" ? ("Converting to " + codec + "…") : "Extracting frames…";
       toast.update("<strong>" + file.name + "</strong><br>" + label + " " + pct + "%");
     }
   };
   ff.on("log", logHandler);
 
-  if (toast) toast.update("<strong>" + file.name + "</strong><br>Converting to WebM + VP9 alpha… 0%");
-  var ext = (file.name.split('.').pop() || "mov").toLowerCase();
+  var ext = (file.name.split('.').pop() || "bin").toLowerCase();
   var inputName = "input." + ext;
-  var outputName = "output.webm";
+  var fps = (opts && opts.fps) || 24;
   var buf = new Uint8Array(await file.arrayBuffer());
   await ff.writeFile(inputName, buf);
 
   var frames = null;
-  var fps = (opts && opts.fps) || 24;
-  try {
-    // Pass 1 — produce the playable WebM (used as <video> fallback if frame
-    // pre-decode is skipped or if a downstream consumer doesn't request frames).
-    await ff.exec([
-      "-i", inputName,
-      "-c:v", "libvpx-vp9",
-      "-pix_fmt", "yuva420p",
-      "-vf", "scale='min(1080,iw)':-2:flags=lanczos",
-      "-r", String(fps),
-      "-b:v", "4M",
-      "-deadline", "good",
-      "-cpu-used", "4",
-      "-row-mt", "1",
-      "-tile-columns", "2",
-      "-g", String(fps),
-      "-keyint_min", String(fps),
-      "-auto-alt-ref", "0",
-      outputName
-    ]);
+  var outputName, outputMime, outputExt;
 
-    // Pass 2 — extract per-frame PNGs sized to the destination rect. We re-read
-    // the WebM we just produced so the frame timing matches the playable file
-    // exactly. yuva420p → rgba PNG preserves alpha. The 200 MB budget gate keeps
-    // this off for full-canvas videos (which would balloon to >1 GB).
-    if (opts && opts.destW && opts.destH) {
-      var w = Math.max(1, Math.round(opts.destW));
-      var h = Math.max(1, Math.round(opts.destH));
-      // Estimate frame count from source duration × fps. Cap at a sane upper
-      // bound so an unknown-duration source can't pre-allocate-burn memory.
-      var estCount = srcDur > 0 ? Math.ceil(srcDur * fps) : (fps * 60);
-      var estBytes = w * h * 4 * estCount;
-      var BUDGET = 200 * 1024 * 1024;
-      if (estBytes > BUDGET) {
-        log("Skipped frame pre-decode for \"" + file.name + "\": estimated " +
-            (estBytes / 1048576).toFixed(0) + " MB > 200 MB budget. Using <video> playback.", "warn");
-      } else {
-        stage = "frames";
-        if (toast) toast.update("<strong>" + file.name + "</strong><br>Extracting " + w + "×" + h + " frames…");
-        await ff.exec([
-          "-i", outputName,
-          "-vf", "fps=" + fps + ",scale=" + w + ":" + h + ":flags=lanczos",
-          "-pix_fmt", "rgba",
-          "frame_%04d.png"
-        ]);
-        if (toast) toast.update("<strong>" + file.name + "</strong><br>Decoding bitmaps…");
-        frames = [];
-        // Probe sequentially — ffmpeg numbers frames starting at 1 and the loop
-        // breaks the first time a file doesn't exist (caught readFile error).
-        for (var i = 1; i < 100000; i++) {
-          var pngName = "frame_" + String(i).padStart(4, "0") + ".png";
-          var pngData;
-          try { pngData = await ff.readFile(pngName); } catch (e) { break; }
-          var pngBlob = new Blob([pngData.buffer], { type: "image/png" });
-          var bitmap = await createImageBitmap(pngBlob);
-          frames.push(bitmap);
-          try { await ff.deleteFile(pngName); } catch (e) {}
-          // Yield every 8 frames so the UI doesn't lock during decode of a
-          // long source. Also lets the toast update repaint.
-          if (i % 8 === 0) await new Promise(function(r) { setTimeout(r, 0); });
+  try {
+    if (alpha) {
+      // VP9 WebM alpha + yuva420p — software decoded, so we pre-cache frames.
+      outputName = "output.webm"; outputMime = "video/webm"; outputExt = "webm";
+      if (toast) toast.update("<strong>" + file.name + "</strong><br>Converting to VP9 alpha WebM… 0%");
+      await ff.exec([
+        "-i", inputName,
+        "-c:v", "libvpx-vp9",
+        "-pix_fmt", "yuva420p",
+        "-vf", "scale='min(1080,iw)':-2:flags=lanczos",
+        "-r", String(fps),
+        "-b:v", "4M",
+        "-deadline", "good",
+        "-cpu-used", "4",
+        "-row-mt", "1",
+        "-tile-columns", "2",
+        "-g", String(fps),
+        "-keyint_min", String(fps),
+        "-auto-alt-ref", "0",
+        outputName
+      ]);
+
+      // Frame extraction — sized to opts.destW × opts.destH. Memory budget gate
+      // keeps full-canvas elements off this path (they'd need >1 GB of RAM).
+      if (opts.destW && opts.destH) {
+        var w = Math.max(1, Math.round(opts.destW));
+        var h = Math.max(1, Math.round(opts.destH));
+        var estCount = srcDur > 0 ? Math.ceil(srcDur * fps) : (fps * 60);
+        var estBytes = w * h * 4 * estCount;
+        var BUDGET = 200 * 1024 * 1024;
+        if (estBytes > BUDGET) {
+          log("Skipped frame pre-decode for \"" + file.name + "\": estimated " +
+              (estBytes / 1048576).toFixed(0) + " MB > 200 MB budget. Using <video> playback (software VP9-alpha decode may stutter — consider dropping this video on a non-alpha zone for H.264 hardware playback).", "warn");
+        } else {
+          stage = "frames";
+          if (toast) toast.update("<strong>" + file.name + "</strong><br>Extracting " + w + "×" + h + " frames…");
+          await ff.exec([
+            "-i", outputName,
+            "-vf", "fps=" + fps + ",scale=" + w + ":" + h + ":flags=lanczos",
+            "-pix_fmt", "rgba",
+            "frame_%04d.png"
+          ]);
+          if (toast) toast.update("<strong>" + file.name + "</strong><br>Decoding bitmaps…");
+          frames = [];
+          for (var i = 1; i < 100000; i++) {
+            var pngName = "frame_" + String(i).padStart(4, "0") + ".png";
+            var pngData;
+            try { pngData = await ff.readFile(pngName); } catch (e) { break; }
+            var pngBlob = new Blob([pngData.buffer], { type: "image/png" });
+            var bitmap = await createImageBitmap(pngBlob);
+            frames.push(bitmap);
+            try { await ff.deleteFile(pngName); } catch (e) {}
+            if (i % 8 === 0) await new Promise(function(r) { setTimeout(r, 0); });
+          }
+          log("Pre-decoded " + frames.length + " frames at " + w + "×" + h + " for " + file.name);
         }
-        log("Pre-decoded " + frames.length + " frames at " + w + "×" + h + " for " + file.name);
       }
+    } else {
+      // H.264 MP4 — hardware-accelerated playback, no frame cache needed.
+      // -crf 20 is visually lossless for most content, -preset veryfast keeps
+      // encode time short, faststart lets <video> seek without a prefetch.
+      outputName = "output.mp4"; outputMime = "video/mp4"; outputExt = "mp4";
+      if (toast) toast.update("<strong>" + file.name + "</strong><br>Converting to H.264 MP4… 0%");
+      await ff.exec([
+        "-i", inputName,
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "20",
+        "-pix_fmt", "yuv420p",
+        "-vf", "scale='min(1080,iw)':-2:flags=lanczos",
+        "-r", String(fps),
+        "-g", String(fps * 2),
+        "-movflags", "+faststart",
+        "-an",
+        outputName
+      ]);
     }
   } finally {
     try { ff.off && ff.off("log", logHandler); } catch (e) {}
@@ -1973,29 +2026,38 @@ async function convertMovToWebm(file, toast, opts) {
 
   var data = await ff.readFile(outputName);
   try { await ff.deleteFile(outputName); } catch (e) {}
-  var blob = new Blob([data.buffer], { type: "video/webm" });
-  var outName = file.name.replace(/\.(mov|qt)$/i, "") + ".webm";
-  var webmFile = new File([blob], outName, { type: "video/webm" });
-  return { file: webmFile, frames: frames, fps: fps };
+  var blob = new Blob([data.buffer], { type: outputMime });
+  var outName = file.name.replace(/\.[a-z0-9]+$/i, "") + "." + outputExt;
+  var outFile = new File([blob], outName, { type: outputMime });
+  return { file: outFile, frames: frames, fps: fps, alpha: alpha };
 }
-// Ensure a dropped file is playable by the browser. If it's a MOV/QT, convert
-// through ffmpeg.wasm AND optionally pre-decode frames sized to the destination
-// rect (opts.destW/H). Always returns { file, frames, fps } shape so callers
-// have a uniform thing to store on their state entry. For non-MOV inputs frames
-// stays null and the loader uses <video> playback. On conversion failure shows
-// the CLI toast and returns null so callers short-circuit the load.
+// Back-compat alias for the previous name — still referenced by older call sites
+// in case any survive. Always requests alpha=true to match the old behavior.
+function convertMovToWebm(file, toast, opts) {
+  var merged = Object.assign({ alpha: true }, opts || {});
+  return convertVideo(file, toast, merged);
+}
+// Always run a dropped video through the ffmpeg.wasm pipeline — the converter
+// normalizes codec (H.264 MP4 for non-alpha, VP9 WebM for alpha), fps, and size
+// so playback behavior is the same regardless of what the user dropped. The
+// alpha pipeline also pre-decodes ImageBitmap frames sized to opts.destW × H
+// for stutter-free compositing of logos / badges. Returns { file, frames, fps,
+// alpha } or null on failure (caller short-circuits + the user sees the CLI
+// fallback toast).
 async function coerceToPlayable(file, opts) {
-  if (!looksLikeMov(file)) return { file: file, frames: null, fps: (opts && opts.fps) || 24 };
+  opts = opts || {};
   var toast = createToast({ id: "mov-convert" });
   toast.update("<strong>" + file.name + "</strong><br>Preparing converter…");
   try {
-    var result = await convertMovToWebm(file, toast, opts);
+    var result = await convertVideo(file, toast, opts);
     var summary = result.file.name + " (" + (result.file.size / 1048576).toFixed(1) + " MB)" +
-      (result.frames ? " · " + result.frames.length + " frames cached" : "");
+      (result.frames ? " · " + result.frames.length + " frames cached" : "") +
+      (result.alpha ? " · alpha" : " · H.264 GPU-decoded");
     toast.update("<strong>Converted ✓</strong><br>" + summary);
     setTimeout(function() { toast.close(); }, 3000);
-    log("Converted " + file.name + " → " + result.file.name + " via ffmpeg.wasm" +
-        (result.frames ? " (frames=" + result.frames.length + ")" : ""));
+    log("Converted " + file.name + " → " + result.file.name +
+        " (" + (result.alpha ? "VP9 alpha" : "H.264 MP4") + ")" +
+        (result.frames ? " frames=" + result.frames.length : ""));
     return result;
   } catch (e) {
     log("ffmpeg.wasm conversion failed: " + e.message, "err");
@@ -2009,12 +2071,13 @@ async function coerceToPlayable(file, opts) {
 // Keyed by normalized layer name so one drop applies to every same-named layer
 // across every variant — same convention as Key Art slots.
 async function loadElementVideo(nameKey, file) {
-  // Pick a bitmap size that's big enough for every same-named element across
-  // every variant. Drawing into a smaller box than the bitmap downscales for
-  // free; upscaling would lose quality.
+  // Element videos default to alpha=true (per-instance replacements are usually
+  // logos / badges that composite with transparency). User can flip via the
+  // Transparent checkbox for a full-rect element replacement.
+  var alpha = !$("chkElVideoAlpha") || $("chkElVideoAlpha").checked;
   var rect = largestRectForElements(function(el) { return el.normalizedName === nameKey; });
   var fps = parseInt($("videoFps").value) || 24;
-  var result = await coerceToPlayable(file, { destW: rect.w, destH: rect.h, fps: fps });
+  var result = await coerceToPlayable(file, { destW: rect.w, destH: rect.h, fps: fps, alpha: alpha });
   if (!result) return;
   releaseEntryFrames(state.elementVideos[nameKey]);
   var actualFile = result.file;
@@ -2029,10 +2092,13 @@ async function loadElementVideo(nameKey, file) {
       file: actualFile, video: v,
       loop: prev.loop !== false,
       frames: result.frames,
-      fps: result.fps
+      fps: result.fps,
+      alpha: result.alpha
     };
-    log("Element video loaded for '" + nameKey + "': " + actualFile.name +
-        (result.frames ? " [bitmap-backed: " + result.frames.length + " @ " + rect.w + "×" + rect.h + "]" : " [<video> playback]"));
+    var mode = result.alpha
+      ? (result.frames ? "bitmap-backed: " + result.frames.length + " @ " + rect.w + "×" + rect.h : "<video> alpha fallback")
+      : "<video> H.264 (hardware-decoded)";
+    log("Element video loaded for '" + nameKey + "': " + actualFile.name + " [" + mode + "]");
     var f = currentFrame();
     if (f && state.selectedElementIndex >= 0) {
       var el = f.elements[state.selectedElementIndex];
