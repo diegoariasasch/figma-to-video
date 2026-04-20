@@ -393,6 +393,12 @@
         </div>
         <div class="field" id="fieldBitrate"><label>Bitrate (Mbps)</label><input type="number" id="exportBitrate" value="25" min="1" max="100" step="1" style="width:100%;"></div>
         <div class="field" id="fieldTargetSize" style="display:none;"><label>Target size per variant (MB)</label><input type="number" id="exportTargetMB" value="10" min="1" max="500" step="1" style="width:100%;"></div>
+        <div style="margin:6px 0;">
+          <label style="font-size:11px;" title="Exports an alpha-channel video you can composite in After Effects. Skips background color + background video. Outputs ProRes 4444 MOV if ffmpeg supports it, or a PNG sequence ZIP as fallback."><input type="checkbox" id="chkAlphaExport"> Alpha export (for After Effects)</label>
+          <div style="font-size:10px; color:var(--text-secondary); margin-top:2px; line-height:1.4;">
+            Skips background + bg video. Writes ProRes 4444 MOV (single file, imports natively in AE) or a PNG sequence ZIP if the encoder isn't available in the WASM build.
+          </div>
+        </div>
         <button class="btn-success" id="btnExport" style="width:100%; padding:10px; font-size:13px; font-weight:600;" disabled>Export Video</button>
       </div>
     </div>
@@ -1538,6 +1544,259 @@ async function exportVariant(frame, variantIndex, variantTotal, mimeType, bitrat
   return null;
 }
 
+// ── ALPHA EXPORT (for After Effects) ──
+// Branches off the normal MediaRecorder pipeline. Captures every frame as a PNG
+// from an alpha-enabled canvas (bg color + bg video deliberately skipped), then
+// either encodes to ProRes 4444 MOV via ffmpeg.wasm (single file, AE-native) or
+// falls back to a PNG-sequence ZIP (lossless, import as image sequence in AE)
+// if the prores_ks encoder isn't present in the WASM core build.
+
+// Minimal CRC-32 — used by buildZip. Precomputes a 256-entry table on first call.
+function crc32(bytes) {
+  var tbl = crc32._tbl;
+  if (!tbl) {
+    tbl = crc32._tbl = new Uint32Array(256);
+    for (var i = 0; i < 256; i++) {
+      var c = i;
+      for (var j = 0; j < 8; j++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      tbl[i] = c;
+    }
+  }
+  var crc = 0xFFFFFFFF;
+  for (var k = 0; k < bytes.length; k++) crc = (crc >>> 8) ^ tbl[(crc ^ bytes[k]) & 0xFF];
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+// Build a ZIP archive (STORE method — PNG data is already compressed, so adding
+// deflate would only shave a percent or two at the cost of a compression lib).
+// entries = [{ name: "frame_0001.png", data: Uint8Array }, …]
+function buildZip(entries) {
+  var enc = new TextEncoder();
+  var fileParts = []; // [local header, file bytes, ...]
+  var cdParts = [];   // [central-dir entries]
+  var offset = 0;
+  for (var i = 0; i < entries.length; i++) {
+    var name = enc.encode(entries[i].name);
+    var data = entries[i].data;
+    var crc = crc32(data);
+    // Local file header (0x04034b50) + filename.
+    var lfh = new Uint8Array(30 + name.length);
+    var lv = new DataView(lfh.buffer);
+    lv.setUint32(0, 0x04034b50, true);
+    lv.setUint16(4, 20, true);   // version needed (2.0)
+    lv.setUint16(6, 0, true);    // general flags
+    lv.setUint16(8, 0, true);    // compression = 0 (stored)
+    lv.setUint16(10, 0, true);   // mod time
+    lv.setUint16(12, 0x21, true); // mod date (arbitrary but valid)
+    lv.setUint32(14, crc, true);
+    lv.setUint32(18, data.length, true); // compressed size
+    lv.setUint32(22, data.length, true); // uncompressed size
+    lv.setUint16(26, name.length, true);
+    lv.setUint16(28, 0, true);   // extra field length
+    lfh.set(name, 30);
+    fileParts.push(lfh, data);
+    // Central directory entry (0x02014b50) + filename.
+    var cd = new Uint8Array(46 + name.length);
+    var cv = new DataView(cd.buffer);
+    cv.setUint32(0, 0x02014b50, true);
+    cv.setUint16(4, 20, true);
+    cv.setUint16(6, 20, true);
+    cv.setUint16(8, 0, true);
+    cv.setUint16(10, 0, true);
+    cv.setUint16(12, 0, true);
+    cv.setUint16(14, 0x21, true);
+    cv.setUint32(16, crc, true);
+    cv.setUint32(20, data.length, true);
+    cv.setUint32(24, data.length, true);
+    cv.setUint16(28, name.length, true);
+    cv.setUint16(30, 0, true);
+    cv.setUint16(32, 0, true);
+    cv.setUint16(34, 0, true);
+    cv.setUint16(36, 0, true);
+    cv.setUint32(38, 0, true);
+    cv.setUint32(42, offset, true); // offset of local header
+    cd.set(name, 46);
+    cdParts.push(cd);
+    offset += lfh.length + data.length;
+  }
+  var cdSize = 0; cdParts.forEach(function(c) { cdSize += c.length; });
+  var cdOffset = offset;
+  // End of central directory (0x06054b50).
+  var eocd = new Uint8Array(22);
+  var ev = new DataView(eocd.buffer);
+  ev.setUint32(0, 0x06054b50, true);
+  ev.setUint16(8, entries.length, true);
+  ev.setUint16(10, entries.length, true);
+  ev.setUint32(12, cdSize, true);
+  ev.setUint32(16, cdOffset, true);
+  // Concat everything into one Uint8Array.
+  var total = 0;
+  fileParts.forEach(function(p) { total += p.length; });
+  cdParts.forEach(function(p) { total += p.length; });
+  total += eocd.length;
+  var out = new Uint8Array(total);
+  var pos = 0;
+  fileParts.forEach(function(p) { out.set(p, pos); pos += p.length; });
+  cdParts.forEach(function(p) { out.set(p, pos); pos += p.length; });
+  out.set(eocd, pos);
+  return out;
+}
+// Compose a single alpha frame. Matches composeFrame's element loop but skips
+// bgColor fill and bg video — the whole point of alpha export is a transparent
+// background the user can composite over in AE.
+function composeAlphaFrame(c, frame, w, h, t) {
+  c.save();
+  c.beginPath(); c.rect(0, 0, w, h); c.clip();
+  // NO bg fill. NO state.bgVideo. Elements only.
+  for (var i = 0; i < frame.elements.length; i++) {
+    if (frame.elements[i].visible) drawElement(c, frame.elements[i], t);
+  }
+  c.restore();
+}
+// Encode a PNG sequence to ProRes 4444 MOV via ffmpeg.wasm. Returns a Blob on
+// success, throws if the encoder isn't available (caller falls back to ZIP).
+async function encodeProRes4444(pngs, fps, toast, onProgress) {
+  var ff = await loadFFmpeg();
+  // Write PNGs to the WASM FS.
+  for (var i = 0; i < pngs.length; i++) {
+    await ff.writeFile(pngs[i].name, pngs[i].data);
+    if (onProgress && i % 8 === 0) onProgress("write", (i + 1) / pngs.length);
+  }
+  if (toast) toast.update("<strong>Encoding ProRes 4444…</strong>");
+  // -profile:v 4 = ProRes 4444 (4 = 4444). -vendor apl0 keeps it compatible
+  // with Apple tooling. 10-bit yuva444p10le preserves 10-bit color + alpha.
+  // -qscale:v 10 is near-lossless quality.
+  var stage = "encode";
+  var srcDur = pngs.length / fps;
+  var logHandler = function(e) {
+    var msg = e.message || "";
+    var tm = msg.match(/time=\s*(\d+):(\d+):(\d+\.\d+)/);
+    if (tm && onProgress) {
+      var t = (+tm[1]) * 3600 + (+tm[2]) * 60 + parseFloat(tm[3]);
+      onProgress("encode", Math.min(0.99, t / Math.max(0.1, srcDur)));
+    }
+  };
+  ff.on("log", logHandler);
+  try {
+    await ff.exec([
+      "-framerate", String(fps),
+      "-i", "frame_%04d.png",
+      "-c:v", "prores_ks",
+      "-profile:v", "4",
+      "-pix_fmt", "yuva444p10le",
+      "-qscale:v", "10",
+      "-vendor", "apl0",
+      "output.mov"
+    ]);
+  } finally {
+    try { ff.off && ff.off("log", logHandler); } catch (e) {}
+  }
+  var data;
+  try { data = await ff.readFile("output.mov"); }
+  finally {
+    // Clean up PNGs regardless of success.
+    for (var j = 0; j < pngs.length; j++) {
+      try { await ff.deleteFile(pngs[j].name); } catch (e) {}
+    }
+    try { await ff.deleteFile("output.mov"); } catch (e) {}
+  }
+  return new Blob([data.buffer], { type: "video/quicktime" });
+}
+async function exportAlphaVariant(frame, variantIndex, variantTotal, dur, fps, totalFrames, resOpt) {
+  var expW = frame.width, expH = frame.height;
+  if (resOpt === "1080") { var s = 1080 / frame.height; expW = Math.round(frame.width * s); expH = 1080; }
+  else if (resOpt === "720") { var s2 = 720 / frame.height; expW = Math.round(frame.width * s2); expH = 720; }
+  // Keep dims even (some encoders require it).
+  if (expW % 2 !== 0) expW++;
+  if (expH % 2 !== 0) expH++;
+
+  log("Alpha export variant " + (variantIndex + 1) + "/" + variantTotal + ": '" + frame.exportName + "' " + expW + "x" + expH);
+
+  // Alpha-capable canvas. 2D context's alpha defaults to true but we pass it
+  // explicitly so a future default change can't silently break us.
+  var offCanvas = document.createElement("canvas");
+  offCanvas.width = expW; offCanvas.height = expH;
+  var offCtx = offCanvas.getContext("2d", { alpha: true });
+
+  // Prime bitmap-backed videos — for frame-backed entries this is free (no
+  // decoder seek), but we still call it to line up <video> fallback entries.
+  var kvs = keyArtVideosArr();
+  var allVids = [];
+  kvs.forEach(function(kv) { if (kv.video && !(kv.frames && kv.frames.length)) allVids.push(kv.video); });
+  Object.keys(state.elementVideos).forEach(function(k) {
+    var ev = state.elementVideos[k];
+    if (ev.video && !(ev.frames && ev.frames.length)) allVids.push(ev.video);
+  });
+  if (allVids.length) await Promise.all(allVids.map(function(v) { return primeVideo(v, 0); }));
+
+  // Capture PNG blobs frame by frame. No MediaRecorder — toBlob(png) is
+  // synchronous-ish and lossless, and we're not constrained by wall clock
+  // because nothing is sampling the canvas on a timer.
+  var pngs = [];
+  var sx = expW / frame.width, sy = expH / frame.height;
+  for (var f = 0; f < totalFrames; f++) {
+    if (state.exportCancel) break;
+    var t = f / fps;
+    var pct = ((f + 1) / totalFrames * 100).toFixed(0);
+    $("exportStatus").textContent = "Variant " + (variantIndex + 1) + "/" + variantTotal + " · Capturing frame " + (f + 1) + "/" + totalFrames + " (" + pct + "%)";
+    $("exportProgress").style.width = (pct * 0.5) + "%"; // first half of the bar = capture
+
+    offCtx.save();
+    offCtx.clearRect(0, 0, expW, expH); // transparent
+    offCtx.scale(sx, sy);
+    composeAlphaFrame(offCtx, frame, frame.width, frame.height, t);
+    offCtx.restore();
+
+    // toBlob is async — wait for it. This is slower than MediaRecorder but
+    // necessary for lossless alpha. Typical 1080p PNG encode is 20-80 ms;
+    // worst case a full-canvas opaque frame is a few hundred ms.
+    var blob = await new Promise(function(r) { offCanvas.toBlob(r, "image/png"); });
+    if (!blob) continue;
+    var buf = new Uint8Array(await blob.arrayBuffer());
+    pngs.push({ name: "frame_" + String(f + 1).padStart(4, "0") + ".png", data: buf });
+
+    // Yield so the UI stays responsive during a long capture.
+    if (f % 4 === 0) await new Promise(function(r) { setTimeout(r, 0); });
+  }
+
+  if (state.exportCancel || pngs.length === 0) return null;
+
+  // Try ProRes 4444 MOV first. If prores_ks isn't in the core, fall through to
+  // the ZIP path — user still gets a usable AE input.
+  $("exportStatus").textContent = "Variant " + (variantIndex + 1) + "/" + variantTotal + " · Encoding ProRes 4444…";
+  try {
+    var mov = await encodeProRes4444(pngs, fps, null, function(stage, progress) {
+      var base = stage === "write" ? 50 : 75;
+      var span = stage === "write" ? 25 : 25;
+      var overall = base + Math.round(progress * span);
+      $("exportProgress").style.width = overall + "%";
+      $("exportStatus").textContent = "Variant " + (variantIndex + 1) + "/" + variantTotal + " · " +
+        (stage === "write" ? "Loading frames…" : "Encoding ProRes 4444…") + " " + overall + "%";
+    });
+    var fname = (frame.exportName || ("variant_" + (variantIndex + 1))) + ".mov";
+    triggerDownload(mov, fname);
+    log("Downloaded " + fname + " (" + (mov.size / 1048576).toFixed(1) + " MB) — ProRes 4444 + alpha");
+    return { name: fname, size: mov.size };
+  } catch (e) {
+    log("ProRes encoder unavailable in core (" + e.message + "). Falling back to PNG sequence ZIP.", "warn");
+  }
+
+  // ZIP fallback.
+  $("exportStatus").textContent = "Variant " + (variantIndex + 1) + "/" + variantTotal + " · Building PNG sequence ZIP…";
+  $("exportProgress").style.width = "95%";
+  var zipBytes = buildZip(pngs);
+  var zipBlob = new Blob([zipBytes], { type: "application/zip" });
+  var zname = (frame.exportName || ("variant_" + (variantIndex + 1))) + "_frames.zip";
+  triggerDownload(zipBlob, zname);
+  log("Downloaded " + zname + " (" + (zipBlob.size / 1048576).toFixed(1) + " MB) — " + pngs.length + " PNG frames, import as sequence in AE");
+  return { name: zname, size: zipBlob.size };
+}
+// Helper — trigger a browser download from a Blob. Used by both alpha paths.
+function triggerDownload(blob, filename) {
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement("a"); a.href = url; a.download = filename; a.click();
+  setTimeout(function() { URL.revokeObjectURL(url); }, 5000);
+}
+
 async function exportVideo() {
   if (state.frames.length === 0) return;
   state.exporting = true; state.exportCancel = false;
@@ -1547,6 +1806,7 @@ async function exportVideo() {
   var dur = parseFloat($("videoDuration").value) || 6;
   var fps = parseInt($("videoFps").value) || 24;
   var totalFrames = Math.ceil(dur * fps);
+  var alphaExport = !!($("chkAlphaExport") && $("chkAlphaExport").checked);
   var mode = $("qualityMode").value;
   var bitrateVal;
   if (mode === "size") {
@@ -1558,8 +1818,12 @@ async function exportVideo() {
     bitrateVal = (parseFloat($("exportBitrate").value) || 25) * 1000000;
   }
   var resOpt = $("videoResolution").value;
-  var mimeType = pickMimeType();
-  log("Codec: " + mimeType + ", variants: " + state.frames.length + ", bitrate: " + (bitrateVal / 1000000).toFixed(2) + " Mbps");
+  var mimeType = alphaExport ? "" : pickMimeType();
+  if (alphaExport) {
+    log("Alpha export mode: ProRes 4444 MOV (or PNG sequence ZIP if encoder unavailable). BG color + BG video are skipped.");
+  } else {
+    log("Codec: " + mimeType + ", variants: " + state.frames.length + ", bitrate: " + (bitrateVal / 1000000).toFixed(2) + " Mbps");
+  }
 
   var originalIndex = state.selectedFrameIndex;
   var exportedCount = 0;
@@ -1570,7 +1834,12 @@ async function exportVideo() {
       state.selectedFrameIndex = i;
       renderVariantList();
       setupCanvas();
-      var result = await exportVariant(state.frames[i], i, state.frames.length, mimeType, bitrateVal, dur, fps, totalFrames, resOpt);
+      var result;
+      if (alphaExport) {
+        result = await exportAlphaVariant(state.frames[i], i, state.frames.length, dur, fps, totalFrames, resOpt);
+      } else {
+        result = await exportVariant(state.frames[i], i, state.frames.length, mimeType, bitrateVal, dur, fps, totalFrames, resOpt);
+      }
       if (result) exportedCount++;
       // Small pause between variants so browser has time to flush the download.
       await new Promise(function(r) { setTimeout(r, 300); });
@@ -1720,6 +1989,7 @@ function persistSettings() {
       chkVideoLoop: $("chkVideoLoop").checked,
       chkVideoAlpha: $("chkVideoAlpha") ? $("chkVideoAlpha").checked : false,
       chkElVideoAlpha: $("chkElVideoAlpha") ? $("chkElVideoAlpha").checked : true,
+      chkAlphaExport: $("chkAlphaExport") ? $("chkAlphaExport").checked : false,
       looping: state.looping
     };
     localStorage.setItem(PERSIST_KEY_SETTINGS, JSON.stringify(s));
@@ -1756,13 +2026,14 @@ function loadPersisted() {
       if (obj.chkVideoLoop != null) { $("chkVideoLoop").checked = !!obj.chkVideoLoop; state.bgVideoLoop = !!obj.chkVideoLoop; }
       if (obj.chkVideoAlpha != null && $("chkVideoAlpha")) $("chkVideoAlpha").checked = !!obj.chkVideoAlpha;
       if (obj.chkElVideoAlpha != null && $("chkElVideoAlpha")) $("chkElVideoAlpha").checked = !!obj.chkElVideoAlpha;
+      if (obj.chkAlphaExport != null && $("chkAlphaExport")) $("chkAlphaExport").checked = !!obj.chkAlphaExport;
       if (obj.looping != null) { state.looping = !!obj.looping; $("btnLoop").classList.toggle("active", state.looping); }
       log("Restored saved settings.");
     }
   } catch (e) { log("Settings load failed: " + e.message, "warn"); }
 }
 // Save settings on any change to the right-panel inputs.
-["videoDuration","videoFps","videoResolution","exportBitrate","exportTargetMB","qualityMode","videoOpacity","audioVolume","chkVideoLoop","chkVideoAlpha","chkElVideoAlpha"].forEach(function(id) {
+["videoDuration","videoFps","videoResolution","exportBitrate","exportTargetMB","qualityMode","videoOpacity","audioVolume","chkVideoLoop","chkVideoAlpha","chkElVideoAlpha","chkAlphaExport"].forEach(function(id) {
   var el = $(id); if (!el) return;
   el.addEventListener("change", persistSettings);
   el.addEventListener("input", persistSettings);
